@@ -1,5 +1,3 @@
-#include <pthread.h>
-
 #include "../include/socket_util.h"
 #include "../include/http_proxy_util.h"
 
