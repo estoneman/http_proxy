@@ -69,8 +69,7 @@ char *proxy_recv(int sockfd, ssize_t *nb_recv) {
     // allocate more memory
     if (*nb_recv == RECV_CHUNK_SZ && total_nb_recv == bytes_alloced) {
       realloc_sz = total_nb_recv + (RECV_CHUNK_SZ * (int)pow(2, num_reallocs));
-      if ((recv_buf = realloc_buf(recv_buf, realloc_sz))
-          == NULL) {
+      if ((recv_buf = realloc_buf(recv_buf, realloc_sz)) == NULL) {
         return NULL;
       }
       num_reallocs++;
