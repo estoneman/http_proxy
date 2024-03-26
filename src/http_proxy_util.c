@@ -321,6 +321,7 @@ char *proxy_recv(int sockfd, ssize_t *nb_recv) {
     if (*nb_recv == RECV_CHUNK_SZ && total_nb_recv == bytes_alloced) {
       realloc_sz = total_nb_recv + (RECV_CHUNK_SZ * (int)pow(2, num_reallocs));
       if ((recv_buf = realloc_buf(recv_buf, realloc_sz)) == NULL) {
+        free(recv_buf);  // avoid memory leak of previous buffer on `realloc` failure
         return NULL;
       }
       num_reallocs++;
