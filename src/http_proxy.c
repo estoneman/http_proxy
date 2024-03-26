@@ -49,10 +49,9 @@ int main(int argc, char *argv[]) {
     get_ipstr(ipstr, (struct sockaddr *)&cliaddr);
     fprintf(stderr, "[INFO] socket %d: new connection (%s:%d)\n", connfd, ipstr,
             ntohs(cliaddr.sin_port));
-    fflush(stderr);
 
     if ((pid = fork()) < 0) {
-      perror("fork");
+      fprintf(stderr, "[ERROR] could not create child process: %s\n", strerror(errno));
       close(connfd);
       continue;
     }
@@ -61,10 +60,8 @@ int main(int argc, char *argv[]) {
       close(listenfd);
       handle_connection(connfd);
 
-      fprintf(stderr, "[INFO] exiting child\n");
       exit(EXIT_SUCCESS);
     } else {
-      fprintf(stderr, "[INFO] parent resuming\n");
       close(connfd);
     }
 
