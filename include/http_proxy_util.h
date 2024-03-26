@@ -4,25 +4,22 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/types.h>
 
 #define HTTP_HEADER_KEY_MAX 64
 #define HTTP_HEADER_VALUE_MAX 1024
 #define HTTP_HEADERS_MAX 32
 #define HTTP_HOSTNAME_MAX 256
-#define HTTP_MAXLINE_CMD (HTTP_METHOD_MAX + \
-                          HTTP_URI_MAX + \
-                          HTTP_VERSION_MAX)
+#define HTTP_MAXLINE_CMD (HTTP_METHOD_MAX + HTTP_URI_MAX + HTTP_VERSION_MAX)
 #define HTTP_METHOD_MAX 8
 #define HTTP_PARAM_KEY_MAX 256
 #define HTTP_PARAM_VALUE_MAX 256
 #define HTTP_PORT_MAX_DIGITS 5
 #define HTTP_QUERIES_MAX 32
 #define HTTP_REMOTE_MAX 1024
-#define HTTP_URI_MAX (HTTP_HOSTNAME_MAX + \
-                      HTTP_PORT_MAX_DIGITS + \
-                      HTTP_REMOTE_MAX)
+#define HTTP_URI_MAX \
+  (HTTP_HOSTNAME_MAX + HTTP_PORT_MAX_DIGITS + HTTP_REMOTE_MAX)
 #define HTTP_VERSION_MAX 16
 
 #define HTTP_BAD_REQUEST 400

@@ -1,4 +1,5 @@
 #include "../include/http_proxy_util.h"
+
 #include "../include/socket_util.h"
 
 char *alloc_buf(size_t size) {
@@ -13,7 +14,7 @@ char *alloc_buf(size_t size) {
 }
 
 int chk_alloc_err(void *mem, const char *allocator, const char *func,
-                   int line) {
+                  int line) {
   if (mem == NULL) {
     fprintf(stderr, "%s failed @%s:%d\n", allocator, func, line);
     return -1;
@@ -43,16 +44,16 @@ void handle_connection(int sockfd) {
   ssize_t nb_recv;
   HTTPCommand http_cmd;
   HTTPHeader http_hdrs[HTTP_HEADERS_MAX];
-  
+
   if ((recv_buf = proxy_recv(sockfd, &nb_recv)) == NULL) {
     exit(EXIT_FAILURE);
   }
-  
+
   fprintf(stderr, "[INFO] received %zd bytes\n", nb_recv);
   fflush(stderr);
 
-  if ((parse_rc = parse_request(recv_buf, nb_recv, &http_cmd, http_hdrs))
-      == HTTP_BAD_REQUEST) {
+  if ((parse_rc = parse_request(recv_buf, nb_recv, &http_cmd, http_hdrs)) ==
+      HTTP_BAD_REQUEST) {
     // send 400.html
     fprintf(stderr, "[INFO] %d %s\n", parse_rc, http_status_msg(parse_rc));
   } else {
@@ -104,21 +105,21 @@ ssize_t parse_command(char *line, size_t line_len, HTTPCommand *http_cmd) {
 
   tmp_buf_offset = read_until(line, line_len, ' ', http_cmd->method,
                               sizeof(http_cmd->method));
-  if (tmp_buf_offset == -1) return -1; 
+  if (tmp_buf_offset == -1) return -1;
   buf_offset = tmp_buf_offset;
 
   tmp_buf_offset = read_until(line + buf_offset, line_len - buf_offset, ' ',
-                               uri, sizeof(uri));
-  if (tmp_buf_offset == -1) return -1; 
+                              uri, sizeof(uri));
+  if (tmp_buf_offset == -1) return -1;
   buf_offset += tmp_buf_offset;
 
   tmp_buf_offset = parse_uri(uri, sizeof(uri), &(http_cmd->http_uri));
-  if (tmp_buf_offset == -1) return -1; 
+  if (tmp_buf_offset == -1) return -1;
   // no need to add to `buf_offset`, did 4 lines above
 
   tmp_buf_offset = read_until(line + buf_offset, line_len - buf_offset, '\0',
                               http_cmd->version, sizeof(http_cmd->version));
-  if (tmp_buf_offset == -1) return -1; 
+  if (tmp_buf_offset == -1) return -1;
   buf_offset += tmp_buf_offset;
 
   return buf_offset;
@@ -146,7 +147,7 @@ ssize_t parse_headers(char *recv_buf, ssize_t nb_recv, HTTPHeader *http_hdrs) {
     } HTTPHost;
  */
 ssize_t parse_host(char *buf, size_t len_buf, HTTPHost *http_host) {
-  ssize_t buf_offset; 
+  ssize_t buf_offset;
 
   // port was specified
   if ((buf_offset = read_until(buf, len_buf, ':', http_host->hostname,
@@ -155,7 +156,7 @@ ssize_t parse_host(char *buf, size_t len_buf, HTTPHost *http_host) {
                              http_host->port, sizeof(http_host->port));
   } else {  // port was not specified
     buf_offset = read_until(buf, len_buf, '/', http_host->hostname,
-                             sizeof(http_host->hostname));
+                            sizeof(http_host->hostname));
     strcpy(http_host->port, "80");
   }
 
@@ -209,7 +210,7 @@ ssize_t parse_query(char *buf, HTTPQuery *http_query) {
 }
 
 ssize_t parse_request(char *recv_buf, ssize_t nb_recv, HTTPCommand *http_cmd,
-                  HTTPHeader *http_hdrs) {
+                      HTTPHeader *http_hdrs) {
   int buf_offset, http_status;
   ssize_t skip;
   (void)http_status;
@@ -232,7 +233,8 @@ ssize_t parse_request(char *recv_buf, ssize_t nb_recv, HTTPCommand *http_cmd,
 
   // more data in headers, so validate command first (could return early)
   // TODO: not sure if i need to return an offset from `parse_headers`
-  // if ((buf_offset += parse_headers(recv_buf + buf_offset, nb_recv, http_hdrs))
+  // if ((buf_offset += parse_headers(recv_buf + buf_offset, nb_recv,
+  // http_hdrs))
   //     == -1 ) {
   //   fprintf(stderr, "[ERROR] unable to parse headers\n");
 
@@ -269,18 +271,21 @@ ssize_t parse_uri(char *buf, size_t len_buf, HTTPUri *http_uri) {
 
 void print_command(HTTPCommand http_cmd) {
   fprintf(stderr, "[INFO]\nHTTPCommand {\n");
-  
+
   fprintf(stderr, "  Method: %s\n", http_cmd.method);
   fprintf(stderr, "  HTTPUri {\n");
   fprintf(stderr, "    HTTPHost {\n");
-  fprintf(stderr, "      hostname: %s\n", http_cmd.http_uri.http_host.hostname); 
-  fprintf(stderr, "      port: %s\n", http_cmd.http_uri.http_host.port); 
-  fprintf(stderr, "      remote_uri: %s\n", http_cmd.http_uri.http_host.remote_uri); 
+  fprintf(stderr, "      hostname: %s\n", http_cmd.http_uri.http_host.hostname);
+  fprintf(stderr, "      port: %s\n", http_cmd.http_uri.http_host.port);
+  fprintf(stderr, "      remote_uri: %s\n",
+          http_cmd.http_uri.http_host.remote_uri);
   fprintf(stderr, "    }\n");
   fprintf(stderr, "    HTTPQuery {\n");
 
-  for (size_t i = 0; *(http_cmd.http_uri.http_query[i].param_key) != '\0'; ++i) {
-    fprintf(stderr, "      key: %s\n", http_cmd.http_uri.http_query[i].param_key);
+  for (size_t i = 0; *(http_cmd.http_uri.http_query[i].param_key) != '\0';
+       ++i) {
+    fprintf(stderr, "      key: %s\n",
+            http_cmd.http_uri.http_query[i].param_key);
     fprintf(stderr, "      value: %s\n",
             http_cmd.http_uri.http_query[i].param_value);
   }
@@ -309,7 +314,8 @@ char *proxy_recv(int sockfd, ssize_t *nb_recv) {
 
   total_nb_recv = 0;
   num_reallocs = 1;
-  while ((*nb_recv = recv(sockfd, recv_buf + total_nb_recv, RECV_CHUNK_SZ, 0)) > 0) {
+  while ((*nb_recv = recv(sockfd, recv_buf + total_nb_recv, RECV_CHUNK_SZ, 0)) >
+         0) {
     total_nb_recv += (size_t)*nb_recv;
     // allocate more memory
     if (*nb_recv == RECV_CHUNK_SZ && total_nb_recv == bytes_alloced) {
@@ -341,8 +347,7 @@ ssize_t read_until(char *haystack, size_t len_haystack, char end, char *sink,
   // up to the length of the input buffer, read as many characters are allowed
   // in `sink`
   size_t i;
-  for (i = 0; i < len_haystack && i < len_sink && haystack[i] != end;
-       ++i) {
+  for (i = 0; i < len_haystack && i < len_sink && haystack[i] != end; ++i) {
     sink[i] = haystack[i];
   }
 
@@ -373,7 +378,9 @@ size_t skip_scheme(char *buf) {
   size_t i;
 
   i = 0;
-  while (buf[i] != '/') { i++; }
+  while (buf[i] != '/') {
+    i++;
+  }
 
   return i + 2;
 }

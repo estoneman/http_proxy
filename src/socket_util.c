@@ -74,8 +74,8 @@ void set_timeout(int sockfd) {
 
   rcvtimeo.tv_sec = 0;
   rcvtimeo.tv_usec = RCVTIMEO_USEC;
-  if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &rcvtimeo,
-                 sizeof(rcvtimeo)) < 0) {
+  if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &rcvtimeo, sizeof(rcvtimeo)) <
+      0) {
     perror("setsockopt");
     close(sockfd);
     exit(EXIT_FAILURE);

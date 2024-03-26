@@ -26,7 +26,6 @@
 #define RCVTIMEO_USEC (300 * 1000)
 #define RECV_CHUNK_SZ 1024
 
-
 int fill_socket_info(struct addrinfo **, struct addrinfo **, const char *);
 void *get_inetaddr(struct sockaddr *);
 void get_ipstr(char *, struct sockaddr *);

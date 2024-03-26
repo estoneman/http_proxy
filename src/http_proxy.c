@@ -1,5 +1,5 @@
-#include "../include/socket_util.h"
 #include "../include/http_proxy_util.h"
+#include "../include/socket_util.h"
 
 #define PORT_LEN 6
 
@@ -40,8 +40,8 @@ int main(int argc, char *argv[]) {
   cliaddr_len = sizeof(cliaddr);
 
   while (1) {
-    if ((connfd =
-             accept(listenfd, (struct sockaddr *)&cliaddr, &cliaddr_len)) < 0) {
+    if ((connfd = accept(listenfd, (struct sockaddr *)&cliaddr, &cliaddr_len)) <
+        0) {
       perror("accept");
       continue;
     }
@@ -51,7 +51,8 @@ int main(int argc, char *argv[]) {
             ntohs(cliaddr.sin_port));
 
     if ((pid = fork()) < 0) {
-      fprintf(stderr, "[ERROR] could not create child process: %s\n", strerror(errno));
+      fprintf(stderr, "[ERROR] could not create child process: %s\n",
+              strerror(errno));
       close(connfd);
       continue;
     }
@@ -64,7 +65,6 @@ int main(int argc, char *argv[]) {
     } else {
       close(connfd);
     }
-
   }
 
   return EXIT_SUCCESS;
