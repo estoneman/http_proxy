@@ -28,7 +28,7 @@ int main(int argc, char *argv[]) {
   strcpy(port, argv[1]);
   listenfd = fill_socket_info(&srv_entries, &srv_entry, port);
 
-  if (listen(listenfd, BACKLOG) < 0) {
+  if (listen(listenfd, SOMAXCONN) < 0) {
     perror("listen");
     exit(EXIT_FAILURE);
   }
