@@ -46,7 +46,7 @@ void handle_connection(int sockfd) {
   HTTPHeader http_hdrs[HTTP_HEADERS_MAX];
 
   if ((recv_buf = proxy_recv(sockfd, &nb_recv)) == NULL) {
-    exit(EXIT_FAILURE);
+    exit(EXIT_FAILURE);  // child exit
   }
 
   fprintf(stderr, "[INFO] received %zd bytes\n", nb_recv);
@@ -57,7 +57,7 @@ void handle_connection(int sockfd) {
     // send 400.html
     fprintf(stderr, "[INFO] %d %s\n", parse_rc, http_status_msg(parse_rc));
   } else {
-    print_command(http_cmd);
+    // print_command(http_cmd);
   }
 
   free(recv_buf);
@@ -329,8 +329,10 @@ char *proxy_recv(int sockfd, ssize_t *nb_recv) {
     }
   }
 
-  if (*nb_recv < 0) {
-    // TODO: timeout occurred, not sure what I should do here
+  if (total_nb_recv == 0) {
+    // someone connected, but did not send us data
+    free(recv_buf);
+    return NULL;
   }
 
   *nb_recv = total_nb_recv;
