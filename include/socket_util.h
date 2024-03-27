@@ -18,7 +18,6 @@
 
 #include "../include/http_proxy_util.h"
 
-#define BACKLOG 10
 #define MIN_PORT 1024
 #define MAX_PORT 65535
 
