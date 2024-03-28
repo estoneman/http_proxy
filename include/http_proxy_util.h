@@ -7,10 +7,14 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#define HTML_400 "./err/400.html"
+#define HTML_404 "./err/404.html"
+
 #define HTTP_HEADER_KEY_MAX 64
 #define HTTP_HEADER_VALUE_MAX 1024
 #define HTTP_HEADERS_MAX 32
 #define HTTP_HOSTNAME_MAX 256
+#define HTTP_MAX_ERR_HEADER 1024
 #define HTTP_MAXLINE_CMD (HTTP_METHOD_MAX + HTTP_URI_MAX + HTTP_VERSION_MAX)
 #define HTTP_METHOD_MAX 8
 #define HTTP_PARAM_KEY_MAX 256
@@ -67,8 +71,11 @@ ssize_t parse_query(char *, HTTPQuery *);
 ssize_t parse_request(char *, ssize_t, HTTPCommand *, HTTPHeader *);
 ssize_t parse_uri(char *, size_t, HTTPUri *);
 char *proxy_recv(int, ssize_t *);
+ssize_t proxy_send(int , char *, size_t);
+char *read_file(const char *, size_t *);
 ssize_t read_until(char *, size_t, char, char *, size_t);
 char *realloc_buf(char *, size_t size);
+int send_err(int, const char *, size_t);
 size_t skip_scheme(char *);
 
 // debug
