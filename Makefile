@@ -1,6 +1,9 @@
 CC:=$(shell which gcc)
 
-CFLAGS:=-Wall -Werror -Wextra -pedantic -fsanitize=address -fanalyzer -g -std=gnu11
+CFLAGS:=-Wall -Werror -Wextra \
+-pedantic -fsanitize=address -DDEBUG \
+-fanalyzer -g -std=gnu11
+
 INCLUDE:=include/
 LDFLAGS:=-lm
 
