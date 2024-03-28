@@ -44,21 +44,60 @@ void handle_connection(int sockfd) {
   ssize_t nb_recv;
   HTTPCommand http_cmd;
   HTTPHeader http_hdrs[HTTP_HEADERS_MAX];
+  struct hostent *host_entry;
 
   if ((recv_buf = proxy_recv(sockfd, &nb_recv)) == NULL) {
     exit(EXIT_FAILURE);  // child exit
   }
 
+#ifdef DEBUG
   fprintf(stderr, "[INFO] received %zd bytes\n", nb_recv);
   fflush(stderr);
+#endif
 
   if ((parse_rc = parse_request(recv_buf, nb_recv, &http_cmd, http_hdrs)) ==
       HTTP_BAD_REQUEST) {
     // send 400.html
-    fprintf(stderr, "[INFO] %d %s\n", parse_rc, http_status_msg(parse_rc));
+    if (send_err(sockfd, HTML_400, HTTP_BAD_REQUEST) < 0) {
+      free(recv_buf);
+
+      return;
+    }
   } else {
-    // print_command(http_cmd);
+#ifdef DEBUG
+    print_command(http_cmd);
+#endif
   }
+
+  // check for HTTP GET
+  if (strncmp(http_cmd.method, "GET", strlen("GET")) != 0) {
+    if (send_err(sockfd, HTML_400, HTTP_BAD_REQUEST) < 0) {
+      free(recv_buf);
+
+      return;
+    }
+  }
+
+  // resolve hostname
+  // struct hostent *gethostbyname(const char *name);
+  if ((host_entry = gethostbyname(http_cmd.http_uri.http_host.hostname)) == NULL) {
+    if (send_err(sockfd, HTML_404, HTTP_NOT_FOUND) < 0) {
+      free(recv_buf);
+
+      return;
+    }
+  } else {
+#ifdef DEBUG
+  fprintf(stderr, "[INFO] ip address(es) for %s:\n",
+          http_cmd.http_uri.http_host.hostname);
+  char ipstr[INET6_ADDRSTRLEN];
+  for (char **addr = host_entry->h_addr_list; *addr != NULL; addr++) {
+      inet_ntop(host_entry->h_addrtype, *addr, ipstr, sizeof(ipstr));
+      printf("  -> %s\n", ipstr);
+  }
+#endif
+  }
+
 
   free(recv_buf);
 }
@@ -341,6 +380,46 @@ char *proxy_recv(int sockfd, ssize_t *nb_recv) {
   return recv_buf;
 }
 
+ssize_t proxy_send(int sockfd, char *send_buf, size_t len_send_buf) {
+  ssize_t nb_sent;
+
+  if ((nb_sent = send(sockfd, send_buf, len_send_buf, 0)) < 0) {
+    perror("send");
+    return -1;
+  }
+
+  return nb_sent;
+}
+
+char *read_file(const char *fpath, size_t *nb_read) {
+  char *out_buf;
+  FILE *fp;
+  struct stat st;
+
+  if ((fp = fopen(fpath, "rb")) == NULL) {
+    // server error
+    return NULL;
+  }
+
+  if (stat(fpath, &st) < 0) {
+    // server error
+    fclose(fp);
+    return NULL;
+  }
+
+  out_buf = alloc_buf(st.st_size);
+
+  if ((*nb_read = fread(out_buf, 1, st.st_size, fp)) < (size_t)st.st_size) {
+    fclose(fp);
+
+    return NULL;
+  }
+
+  fclose(fp);
+
+  return out_buf;
+}
+
 ssize_t read_until(char *haystack, size_t len_haystack, char end, char *sink,
                    size_t len_sink) {
   // move past space between ':' and header value
@@ -362,7 +441,8 @@ ssize_t read_until(char *haystack, size_t len_haystack, char end, char *sink,
 
   sink[i] = '\0';
 
-  return (ssize_t)i + 1;  // move pointer to next field of http status line
+  // move pointer to next field of http status line
+  return end != '/' ? (ssize_t)i + 1 : (ssize_t)i;
 }
 
 char *realloc_buf(char *buf, size_t size) {
@@ -376,6 +456,60 @@ char *realloc_buf(char *buf, size_t size) {
   buf = tmp_buf;
 
   return buf;
+}
+
+int send_err(int sockfd, const char *fpath, size_t http_status_code) {
+  char *send_buf, *file_contents;
+  ssize_t nb_sent;
+  size_t nb_read, len_headers;
+
+  if ((file_contents = read_file(fpath, &nb_read)) == NULL) {
+#ifdef DEBUG
+  fprintf(stderr, "[INFO] unable to read file %s\n", fpath);
+#endif
+    return -1;
+  }
+
+  // build headers
+  // http_version http_code http_message\r\n
+  // Content-Type: text/html\r\n
+  // Content-Length: %zu\r\n
+  // \r\n
+  // <html>...</html>
+  char headers[HTTP_MAX_ERR_HEADER];
+  snprintf(headers, sizeof(headers), "HTTP/1.1 %zu %s\r\n"
+                                     "Content-Type: text/html\r\n"
+                                     "Content-Length: %zu\r\n"
+                                     "\r\n",
+                                     http_status_code,
+                                     http_status_msg(http_status_code),
+                                     nb_read);
+
+  len_headers = strlen(headers);
+
+  if ((send_buf = alloc_buf(len_headers + nb_read + 1)) == NULL) {
+    fprintf(stderr, "[FATAL] child process ran out of memory\n");
+    exit(EXIT_FAILURE);
+  }
+
+  strncpy(send_buf, headers, len_headers);
+  send_buf[len_headers] = '\0';
+  strncat(send_buf, file_contents, nb_read);
+
+  if ((size_t)(nb_sent = proxy_send(sockfd, file_contents, nb_read)) != nb_read) {
+#ifdef DEBUG
+    fprintf(stderr, "[ERROR] incomplete send of %s\n", fpath);
+#endif
+    free(file_contents);
+    free(send_buf);
+
+    return -1;
+  }
+
+  free(file_contents);
+  free(send_buf);
+
+  return 0;
 }
 
 size_t skip_scheme(char *buf) {
