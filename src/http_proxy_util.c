@@ -80,7 +80,8 @@ void handle_connection(int sockfd) {
 
   // resolve hostname
   // struct hostent *gethostbyname(const char *name);
-  if ((host_entry = gethostbyname(http_cmd.http_uri.http_host.hostname)) == NULL) {
+  if ((host_entry = gethostbyname(http_cmd.http_uri.http_host.hostname)) ==
+      NULL) {
     if (send_err(sockfd, HTML_404, HTTP_NOT_FOUND) < 0) {
       free(recv_buf);
 
@@ -88,16 +89,15 @@ void handle_connection(int sockfd) {
     }
   } else {
 #ifdef DEBUG
-  fprintf(stderr, "[INFO] ip address(es) for %s:\n",
-          http_cmd.http_uri.http_host.hostname);
-  char ipstr[INET6_ADDRSTRLEN];
-  for (char **addr = host_entry->h_addr_list; *addr != NULL; addr++) {
+    fprintf(stderr, "[INFO] ip address(es) for %s:\n",
+            http_cmd.http_uri.http_host.hostname);
+    char ipstr[INET6_ADDRSTRLEN];
+    for (char **addr = host_entry->h_addr_list; *addr != NULL; addr++) {
       inet_ntop(host_entry->h_addrtype, *addr, ipstr, sizeof(ipstr));
       printf("  -> %s\n", ipstr);
-  }
+    }
 #endif
   }
-
 
   free(recv_buf);
 }
@@ -465,7 +465,7 @@ int send_err(int sockfd, const char *fpath, size_t http_status_code) {
 
   if ((file_contents = read_file(fpath, &nb_read)) == NULL) {
 #ifdef DEBUG
-  fprintf(stderr, "[INFO] unable to read file %s\n", fpath);
+    fprintf(stderr, "[INFO] unable to read file %s\n", fpath);
 #endif
     return -1;
   }
@@ -477,13 +477,12 @@ int send_err(int sockfd, const char *fpath, size_t http_status_code) {
   // \r\n
   // <html>...</html>
   char headers[HTTP_MAX_ERR_HEADER];
-  snprintf(headers, sizeof(headers), "HTTP/1.1 %zu %s\r\n"
-                                     "Content-Type: text/html\r\n"
-                                     "Content-Length: %zu\r\n"
-                                     "\r\n",
-                                     http_status_code,
-                                     http_status_msg(http_status_code),
-                                     nb_read);
+  snprintf(headers, sizeof(headers),
+           "HTTP/1.1 %zu %s\r\n"
+           "Content-Type: text/html\r\n"
+           "Content-Length: %zu\r\n"
+           "\r\n",
+           http_status_code, http_status_msg(http_status_code), nb_read);
 
   len_headers = strlen(headers);
 
@@ -496,7 +495,8 @@ int send_err(int sockfd, const char *fpath, size_t http_status_code) {
   send_buf[len_headers] = '\0';
   strncat(send_buf, file_contents, nb_read);
 
-  if ((size_t)(nb_sent = proxy_send(sockfd, file_contents, nb_read)) != nb_read) {
+  if ((size_t)(nb_sent = proxy_send(sockfd, file_contents, nb_read)) !=
+      nb_read) {
 #ifdef DEBUG
     fprintf(stderr, "[ERROR] incomplete send of %s\n", fpath);
 #endif

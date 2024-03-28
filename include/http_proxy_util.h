@@ -71,7 +71,7 @@ ssize_t parse_query(char *, HTTPQuery *);
 ssize_t parse_request(char *, ssize_t, HTTPCommand *, HTTPHeader *);
 ssize_t parse_uri(char *, size_t, HTTPUri *);
 char *proxy_recv(int, ssize_t *);
-ssize_t proxy_send(int , char *, size_t);
+ssize_t proxy_send(int, char *, size_t);
 char *read_file(const char *, size_t *);
 ssize_t read_until(char *, size_t, char, char *, size_t);
 char *realloc_buf(char *, size_t size);
