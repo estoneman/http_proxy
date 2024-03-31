@@ -1,26 +1,70 @@
 #include "../include/socket_util.h"
 
-int fill_socket_info(struct addrinfo **srv_entries, struct addrinfo **srv_entry,
-                     const char *port) {
+// create `connection_sock`
+int connection_sock(const char *hostname, const char *port) {
+  struct addrinfo hints, *srv_entries, *srv_entry;
   int sockfd, addrinfo_status;
-  struct addrinfo hints;
+
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+
+  if ((addrinfo_status = getaddrinfo(hostname, port, &hints, &srv_entries)) <
+      0) {
+    fprintf(stderr, "[ERROR] getaddrinfo: %s\n", gai_strerror(addrinfo_status));
+    return -1;
+  }
+
+  // loop through results of call to getaddrinfo
+  for (srv_entry = srv_entries; srv_entry != NULL;
+       srv_entry = srv_entry->ai_next) {
+    // create socket through which server communication will be facililated
+    if ((sockfd = socket(srv_entry->ai_family, srv_entry->ai_socktype,
+                         srv_entry->ai_protocol)) < 0) {
+      perror("socket");
+      continue;
+    }
+
+    if (connect(sockfd, srv_entry->ai_addr, srv_entry->ai_addrlen) < 0) {
+      close(sockfd);
+      perror("connect");
+      continue;
+    }
+
+    break;  // successfully created socket and connected to remote service
+  }
+
+  if (srv_entry == NULL) {
+    freeaddrinfo(srv_entries);
+
+    return -1;
+  }
+
+  freeaddrinfo(srv_entries);
+
+  return sockfd;
+}
+
+int listen_sock(const char *port) {
+  struct addrinfo hints, *srv_entries, *srv_entry;
+  int sockfd, addrinfo_status;
 
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_PASSIVE;
 
-  if ((addrinfo_status = getaddrinfo(NULL, port, &hints, srv_entries)) < 0) {
+  if ((addrinfo_status = getaddrinfo(NULL, port, &hints, &srv_entries)) < 0) {
     fprintf(stderr, "[ERROR] getaddrinfo: %s\n", gai_strerror(addrinfo_status));
-    exit(EXIT_FAILURE);
+    return -1;
   }
 
   // loop through results of call to getaddrinfo
-  for (*srv_entry = *srv_entries; *srv_entry != NULL;
-       *srv_entry = (*srv_entry)->ai_next) {
+  for (srv_entry = srv_entries; srv_entry != NULL;
+       srv_entry = srv_entry->ai_next) {
     // create socket through which server communication will be facililated
-    if ((sockfd = socket((*srv_entry)->ai_family, (*srv_entry)->ai_socktype,
-                         (*srv_entry)->ai_protocol)) < 0) {
+    if ((sockfd = socket(srv_entry->ai_family, srv_entry->ai_socktype,
+                         srv_entry->ai_protocol)) < 0) {
       perror("socket");
       continue;
     }
@@ -30,11 +74,11 @@ int fill_socket_info(struct addrinfo **srv_entries, struct addrinfo **srv_entry,
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) <
         0) {
       perror("setsockopt");
-      exit(EXIT_FAILURE);
+      return -1;
     }
 
     // bind socket to network address(es)
-    if (bind(sockfd, (*srv_entry)->ai_addr, (*srv_entry)->ai_addrlen) < 0) {
+    if (bind(sockfd, srv_entry->ai_addr, srv_entry->ai_addrlen) < 0) {
       perror("bind");
       continue;
     }
@@ -42,12 +86,13 @@ int fill_socket_info(struct addrinfo **srv_entries, struct addrinfo **srv_entry,
     break;  // successfully created socket and binded to address
   }
 
-  if (*srv_entry == NULL) {
+  if (srv_entry == NULL) {
     fprintf(stderr, "[ERROR] could not bind to any address\n");
-    freeaddrinfo(*srv_entries);
 
-    exit(EXIT_FAILURE);
+    return -1;
   }
+
+  freeaddrinfo(srv_entries);
 
   return sockfd;
 }
