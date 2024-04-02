@@ -5,7 +5,7 @@ CFLAGS:=-Wall -Werror -Wextra \
 -fanalyzer -g -std=gnu11
 
 INCLUDE:=include/
-LDFLAGS:=-lm
+LDFLAGS:=-lm -pthread
 
 SRC_DIR:=src
 SRC:=$(wildcard $(SRC_DIR)/*.c)
