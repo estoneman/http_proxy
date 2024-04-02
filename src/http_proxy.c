@@ -1,3 +1,8 @@
+/* http_proxy.c */
+
+#include <signal.h>
+#include <sys/wait.h>
+
 #include "../include/http_proxy_util.h"
 #include "../include/socket_util.h"
 
@@ -5,6 +10,15 @@
 
 void usage(const char *program) {
   fprintf(stderr, "usage: %s <port (1024|65535)\n", program);
+}
+
+void sigchld_handler(int s __attribute__((unused))) {
+  int saved_errno = errno;
+
+  while (waitpid(-1, NULL, WNOHANG) > 0) {
+  }  // reap dead child processes
+
+  errno = saved_errno;
 }
 
 int main(int argc, char *argv[]) {
@@ -18,24 +32,33 @@ int main(int argc, char *argv[]) {
     exit(EXIT_FAILURE);
   }
 
-  struct addrinfo *srv_entries, *srv_entry;
   struct sockaddr_in cliaddr;
   socklen_t cliaddr_len;
   int listenfd, connfd;
   char port[PORT_LEN], ipstr[INET6_ADDRSTRLEN];
+  struct sigaction sa;
   pid_t pid;
 
   strcpy(port, argv[1]);
-  listenfd = fill_socket_info(&srv_entries, &srv_entry, port);
+  if ((listenfd = listen_sockfd(port)) == -1) {
+    exit(EXIT_FAILURE);
+  }
 
   if (listen(listenfd, SOMAXCONN) < 0) {
     perror("listen");
     exit(EXIT_FAILURE);
   }
 
-  fprintf(stderr, "[INFO] listening on 0.0.0.0:%s\n", port);
+  sa.sa_handler = sigchld_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
 
-  freeaddrinfo(srv_entries);
+  if (sigaction(SIGCHLD, &sa, NULL) == -1) {
+    perror("sigaction");
+    exit(EXIT_FAILURE);
+  }
+
+  fprintf(stderr, "[INFO] listening on 0.0.0.0:%s\n", port);
 
   cliaddr_len = sizeof(cliaddr);
 
@@ -62,7 +85,7 @@ int main(int argc, char *argv[]) {
       handle_connection(connfd);
 
       exit(EXIT_SUCCESS);
-    } else {
+    } else {  // parent process
       close(connfd);
     }
   }
