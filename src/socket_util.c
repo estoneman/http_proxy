@@ -1,7 +1,6 @@
 #include "../include/socket_util.h"
 
-// create `connection_sock`
-int connection_sock(const char *hostname, const char *port) {
+int connection_sockfd(const char *hostname, const char *port) {
   struct addrinfo hints, *srv_entries, *srv_entry;
   int sockfd, addrinfo_status;
 
@@ -36,7 +35,6 @@ int connection_sock(const char *hostname, const char *port) {
 
   if (srv_entry == NULL) {
     freeaddrinfo(srv_entries);
-
     return -1;
   }
 
@@ -45,9 +43,9 @@ int connection_sock(const char *hostname, const char *port) {
   return sockfd;
 }
 
-int listen_sock(const char *port) {
+int listen_sockfd(const char *port) {
   struct addrinfo hints, *srv_entries, *srv_entry;
-  int sockfd, addrinfo_status;
+  int sockfd, addrinfo_status, enable;
 
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_UNSPEC;
@@ -70,14 +68,14 @@ int listen_sock(const char *port) {
     }
 
     // convenience socket option for rapid reuse of sockets
-    int enable = 1;
+    enable = 1;
     if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) <
         0) {
       perror("setsockopt");
       return -1;
     }
 
-    // bind socket to network address(es)
+    // bind socket to current candidate
     if (bind(sockfd, srv_entry->ai_addr, srv_entry->ai_addrlen) < 0) {
       perror("bind");
       continue;
@@ -88,7 +86,6 @@ int listen_sock(const char *port) {
 
   if (srv_entry == NULL) {
     fprintf(stderr, "[ERROR] could not bind to any address\n");
-
     return -1;
   }
 
