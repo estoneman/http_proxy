@@ -1,6 +1,10 @@
+/* http_proxy_util.c */
+
 #include "../include/http_proxy_util.h"
 
 #include "../include/socket_util.h"
+
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 char *alloc_buf(size_t size) {
   char *buf;
@@ -11,6 +15,118 @@ char *alloc_buf(size_t size) {
   }
 
   return buf;
+}
+
+void *async_forward_request(void *request) {
+  HTTPProxyState *state = (HTTPProxyState *)request;
+  ssize_t nb_sent;
+
+  pthread_mutex_lock(&mutex);
+
+  if ((nb_sent = proxy_send(state->origin_sockfd, state->request,
+                            state->len_request)) != state->len_request) {
+#ifdef DEBUG
+    fprintf(stderr, "[ERROR] incomplete request forward (%zd != %zd)\n",
+            nb_sent, state->len_request);
+#endif
+
+    free(state->request);
+    return NULL;
+  }
+  free(state->request);
+
+  if ((state->response =
+           proxy_recv(state->origin_sockfd, &(state->len_response))) == NULL) {
+    return NULL;
+  }
+
+  pthread_mutex_unlock(&mutex);
+
+  return NULL;
+}
+
+void *async_forward_response(void *response) {
+  HTTPProxyState *state = (HTTPProxyState *)response;
+  ssize_t nb_sent;
+
+  pthread_mutex_lock(&mutex);
+
+  if ((nb_sent = proxy_send(state->client_sockfd, state->response,
+                            state->len_response)) != state->len_response) {
+#ifdef DEBUG
+    fprintf(stderr, "[ERROR] incomplete request forward (%zd != %zd)\n",
+            nb_sent, state->len_request);
+#endif
+
+    return NULL;
+  }
+
+  pthread_mutex_unlock(&mutex);
+
+  return NULL;
+}
+
+/*
+ * format:
+ *   <method> <uri> <version>\r\n
+ *   <header-key>: <header-value>\r\n
+ *   ...
+ * notes:
+ *   - check value of 'Proxy-Connection' header
+ *   - forward everything else for now
+ */
+char *build_request(HTTPCommand *http_cmd, HTTPHeader **http_hdrs,
+                    size_t n_hdrs, size_t *len_request) {
+  char *request_buf;
+  char uri[HTTP_URI_MAX];
+  size_t len_uri;
+
+  if ((request_buf = alloc_buf(sizeof(HTTPCommand) +
+                               (sizeof(HTTPHeader) * n_hdrs))) == NULL) {
+    return NULL;
+  }
+
+  *len_request = 0;
+
+  // recreate header buffer
+  len_uri = 0;
+  len_uri +=
+      snprintf(uri, sizeof(http_cmd->uri), "%s", http_cmd->uri.host.remote_uri);
+
+  for (size_t i = 0; *(http_cmd->uri.query[i].key) != '\0'; ++i) {
+    if (i == 0)
+      len_uri += snprintf(uri + len_uri, sizeof(char) + 1, "%c", '?');
+    else
+      len_uri += snprintf(uri + len_uri, sizeof(char) + 1, "%c", '&');
+
+    len_uri += snprintf(uri + len_uri, strlen(http_cmd->uri.query[i].key) + 2,
+                        "%s=", http_cmd->uri.query[i].key);
+    len_uri += snprintf(uri + len_uri, strlen(http_cmd->uri.query[i].value) + 1,
+                        "%s", http_cmd->uri.query[i].value);
+  }
+  *len_request += snprintf(request_buf, HTTP_MAXLINE_CMD, "%s %s %s\r\n",
+                           http_cmd->method, uri, http_cmd->version);
+
+  char key[HTTP_HEADER_KEY_MAX], value[HTTP_HEADER_VALUE_MAX];
+  for (size_t i = 0; i < n_hdrs; ++i) {
+    strncpy(key, (*http_hdrs)[i].key, strlen((*http_hdrs)[i].key) + 1);
+    strncpy(value, (*http_hdrs)[i].value, strlen((*http_hdrs)[i].value) + 1);
+
+    // forward 'Connection' header with same value
+    if (strncmp(key, "Proxy-Connection", strlen(key)) == 0) {
+      strncpy(key, "Connection", strlen("Connection") + 1);
+    }
+
+    *len_request +=
+        snprintf(request_buf + *len_request, strlen(key) + 3, "%s: ", key);
+    *len_request += snprintf(request_buf + *len_request, strlen(value) + 3,
+                             "%s\r\n", value);
+  }
+
+  strncpy(request_buf + *len_request, "\r\n", strlen("\r\n") + 1);
+  *len_request += strlen("\r\n");
+
+  return request_buf;
 }
 
 int chk_alloc_err(void *mem, const char *allocator, const char *func,
@@ -38,15 +154,17 @@ ssize_t find_crlf(char *buf, size_t len_buf) {
   return -1;
 }
 
-void handle_connection(int sockfd) {
-  char *recv_buf;
-  int parse_rc;
+void handle_connection(int client_sockfd) {
+  char *client_buf, *request_buf;
+  int parse_rc, origin_sockfd;
   ssize_t nb_recv;
+  size_t n_hdrs, len_request;
   HTTPCommand http_cmd;
-  HTTPHeader http_hdrs[HTTP_HEADERS_MAX];
-  struct hostent *host_entry;
+  HTTPHeader *http_hdrs;
+  HTTPProxyState state;
+  pthread_t request_thread, response_thread;
 
-  if ((recv_buf = proxy_recv(sockfd, &nb_recv)) == NULL) {
+  if ((client_buf = proxy_recv(client_sockfd, &nb_recv)) == NULL) {
     exit(EXIT_FAILURE);  // child exit
   }
 
@@ -55,51 +173,66 @@ void handle_connection(int sockfd) {
   fflush(stderr);
 #endif
 
-  if ((parse_rc = parse_request(recv_buf, nb_recv, &http_cmd, http_hdrs)) ==
-      HTTP_BAD_REQUEST) {
-    // send 400.html
-    if (send_err(sockfd, HTML_400, HTTP_BAD_REQUEST) < 0) {
-      free(recv_buf);
+  http_hdrs = malloc(HTTP_HEADERS_MAX * sizeof(HTTPHeader));
+  chk_alloc_err(http_hdrs, "malloc", __func__, __LINE__ - 1);
+
+  if ((parse_rc = parse_request(client_buf, nb_recv, &http_cmd, http_hdrs,
+                                &n_hdrs)) != 0) {
+    if (send_err(client_sockfd, parse_rc) < 0) {
+      free(client_buf);
+      free(http_hdrs);
 
       return;
     }
-  } else {
-#ifdef DEBUG
-    print_command(http_cmd);
-#endif
+    free(client_buf);
+    free(http_hdrs);
+
+    return;
   }
 
-  // check for HTTP GET
-  if (strncmp(http_cmd.method, "GET", strlen("GET")) != 0) {
-    if (send_err(sockfd, HTML_400, HTTP_BAD_REQUEST) < 0) {
-      free(recv_buf);
+  free(client_buf);
 
-      return;
+  if ((origin_sockfd = connection_sockfd(http_cmd.uri.host.hostname,
+                                         http_cmd.uri.host.port)) == -1) {
+    // could not create socket to connect to origin server
+    if (send_err(client_sockfd, HTTP_NOT_FOUND_CODE) < 0) {
+      free(http_hdrs);
+      exit(EXIT_FAILURE);
     }
+
+    return;
   }
 
-  // resolve hostname
-  // struct hostent *gethostbyname(const char *name);
-  if ((host_entry = gethostbyname(http_cmd.http_uri.http_host.hostname)) ==
-      NULL) {
-    if (send_err(sockfd, HTML_404, HTTP_NOT_FOUND) < 0) {
-      free(recv_buf);
+  request_buf = build_request(&http_cmd, &http_hdrs, n_hdrs, &len_request);
 
-      return;
-    }
-  } else {
-#ifdef DEBUG
-    fprintf(stderr, "[INFO] ip address(es) for %s:\n",
-            http_cmd.http_uri.http_host.hostname);
-    char ipstr[INET6_ADDRSTRLEN];
-    for (char **addr = host_entry->h_addr_list; *addr != NULL; addr++) {
-      inet_ntop(host_entry->h_addrtype, *addr, ipstr, sizeof(ipstr));
-      printf("  -> %s\n", ipstr);
-    }
-#endif
+  // initialize thread state
+  state.client_sockfd = client_sockfd, state.origin_sockfd = origin_sockfd,
+  state.request = request_buf;
+  state.len_request = len_request;
+  state.response = NULL;
+  state.len_response = -1;
+
+  if (pthread_create(&request_thread, NULL, async_forward_request, &state) <
+      0) {
+    fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+            __LINE__ - 1);
+    exit(EXIT_FAILURE);
   }
 
-  free(recv_buf);
+  if (pthread_create(&response_thread, NULL, async_forward_response, &state) <
+      0) {
+    fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+            __LINE__ - 1);
+    exit(EXIT_FAILURE);
+  }
+
+  pthread_join(request_thread, NULL);
+  pthread_join(response_thread, NULL);
+
+  free(state.response);
+  free(http_hdrs);
+
+  close(origin_sockfd);
 }
 
 ssize_t http_readline(char *buf, size_t len_buf, char *out_buf) {
@@ -115,18 +248,15 @@ ssize_t http_readline(char *buf, size_t len_buf, char *out_buf) {
   return needle_idx + 2;  // move past CRLF
 }
 
-const char *http_status_msg(int http_status) {
-  switch (http_status) {
-    case HTTP_BAD_REQUEST:
+const char *http_status_msg(int http_status_code) {
+  switch (http_status_code) {
+    case HTTP_BAD_REQUEST_CODE:
       return "Bad Request";
-    case HTTP_NOT_FOUND:
+    case HTTP_NOT_FOUND_CODE:
       return "Not Found";
-    case HTTP_METHOD_NOT_ALLOWED:
-      return "Method Not Allowed";
-    case HTTP_VERSION_NOT_SUPPORTED:
-      return "HTTP Version Not Supported";
     default:
-      fprintf(stderr, "[FATAL] this code should be unreachable\n");
+      fprintf(stderr, "[FATAL] (%s:%d) this code should be unreachable\n",
+              __func__, __LINE__ - 1);
       exit(EXIT_FAILURE);
   }
 }
@@ -134,34 +264,49 @@ const char *http_status_msg(int http_status) {
 /*
     typedef struct {
       char method[HTTP_METHOD_MAX];
-      HTTPUri http_uri;
+      HTTPUri uri;
       char version[HTTP_VERSION_MAX];
     } HTTPCommand;
  */
-ssize_t parse_command(char *line, size_t line_len, HTTPCommand *http_cmd) {
-  ssize_t buf_offset, tmp_buf_offset;
+ssize_t parse_command(char *client_buf, size_t nb_recv, HTTPCommand *http_cmd) {
+  ssize_t buf_offset, tmp_buf_offset, skip;
+  char line[HTTP_MAXLINE_CMD];
+  size_t line_len;
   char uri[HTTP_URI_MAX];
 
-  tmp_buf_offset = read_until(line, line_len, ' ', http_cmd->method,
-                              sizeof(http_cmd->method));
-  if (tmp_buf_offset == -1) return -1;
+  skip = http_readline(client_buf, nb_recv, line);
+  if (skip == -1 || (size_t)skip == nb_recv) {
+    // CRLF does not exist within bounds of client request buffer [0, nb_recv]
+    return -1;
+  }
+
+  line_len = strlen(line);
+
+  if ((tmp_buf_offset = read_until(line, line_len, ' ', http_cmd->method,
+                                   sizeof(http_cmd->method))) == -1) {
+    return -1;
+  }
   buf_offset = tmp_buf_offset;
 
-  tmp_buf_offset = read_until(line + buf_offset, line_len - buf_offset, ' ',
-                              uri, sizeof(uri));
-  if (tmp_buf_offset == -1) return -1;
+  if ((tmp_buf_offset = read_until(line + buf_offset, line_len - buf_offset,
+                                   ' ', uri, sizeof(uri))) == -1) {
+    return -1;
+  }
   buf_offset += tmp_buf_offset;
 
-  tmp_buf_offset = parse_uri(uri, sizeof(uri), &(http_cmd->http_uri));
-  if (tmp_buf_offset == -1) return -1;
-  // no need to add to `buf_offset`, did 4 lines above
+  if ((tmp_buf_offset = parse_uri(uri, sizeof(uri), &(http_cmd->uri))) == -1) {
+    return -1;
+  }
+  // no need to increment `buf_offset`, did 4 lines above
 
-  tmp_buf_offset = read_until(line + buf_offset, line_len - buf_offset, '\0',
-                              http_cmd->version, sizeof(http_cmd->version));
-  if (tmp_buf_offset == -1) return -1;
+  if ((tmp_buf_offset =
+           read_until(line + buf_offset, line_len - buf_offset, '\0',
+                      http_cmd->version, sizeof(http_cmd->version))) == -1) {
+    return -1;
+  }
   buf_offset += tmp_buf_offset;
 
-  return buf_offset;
+  return buf_offset + 1;
 }
 
 /*
@@ -170,12 +315,38 @@ ssize_t parse_command(char *line, size_t line_len, HTTPCommand *http_cmd) {
       char value[HTTP_HEADER_VALUE_MAX];
     } HTTPHeader;
  */
-ssize_t parse_headers(char *recv_buf, ssize_t nb_recv, HTTPHeader *http_hdrs) {
-  (void)recv_buf;
-  (void)nb_recv;
-  (void)http_hdrs;
+ssize_t parse_headers(char *read_buf, size_t max_read, HTTPHeader *http_hdrs,
+                      size_t *n_hdrs) {
+  char line_buf[HTTP_MAXLINE_HDR + 1];
+  ssize_t local_offset, global_offset, i, j;
 
-  return 0;
+  global_offset = 0;
+  local_offset = 0;
+  *n_hdrs = 0;
+  while ((local_offset = http_readline(read_buf, max_read, line_buf)) > 0) {
+    i = 0;
+    j = read_until(line_buf + i, max_read - global_offset, ':',
+                   http_hdrs[*n_hdrs].key, HTTP_HEADER_KEY_MAX);
+    if (j == -1) return -1;
+
+    i += j;
+
+    j = read_until(line_buf + i, max_read - global_offset - i, '\0',
+                   http_hdrs[*n_hdrs].value, HTTP_HEADER_VALUE_MAX);
+    if (j == -1) return -1;
+
+    i += j;
+
+    read_buf += local_offset;
+    global_offset += local_offset;
+    if (*n_hdrs == HTTP_HEADERS_MAX - 1) {
+      return -1;
+    }
+    (*n_hdrs)++;
+  }
+
+  // move past final CRLF
+  return local_offset < 0 ? local_offset : global_offset + 2;
 }
 
 /*
@@ -210,75 +381,64 @@ ssize_t parse_host(char *buf, size_t len_buf, HTTPHost *http_host) {
 
 /*
     typedef struct {
-      char param_key[HTTP_PARAM_KEY_MAX];
-      char param_value[HTTP_PARAM_VALUE_MAX];
+      char key[HTTP_PARAM_KEY_MAX];
+      char value[HTTP_PARAM_VALUE_MAX];
     } HTTPQuery;
  */
 ssize_t parse_query(char *buf, HTTPQuery *http_query) {
   char *param_sep = "&", *keyval_sep = "=";
-  char *param_saveptr, *param_key, *param_value, *value;
+  char *key_saveptr, *key, *value_saveptr, *value;
   ssize_t buf_offset;
   size_t i;
 
   memset(http_query, 0, sizeof(http_query) * HTTP_QUERIES_MAX);
-  param_key = strtok_r(buf, param_sep, &param_saveptr);
+  key = strtok_r(buf, param_sep, &key_saveptr);
   buf_offset = 0;
   i = 0;
 
-  while (param_key != NULL) {
-    value = strtok_r(param_key, keyval_sep, &param_value);
+  while (key != NULL) {
+    value = strtok_r(key, keyval_sep, &value_saveptr);
     while (value != NULL) {
-      value = strtok_r(NULL, keyval_sep, &param_value);
+      value = strtok_r(NULL, keyval_sep, &value_saveptr);
       if (value) {
-        size_t param_key_len = strlen(param_key);
-        size_t param_value_len = strlen(value);
+        size_t key_len = strlen(key);
+        size_t value_saveptr_len = strlen(value);
 
-        strncpy(http_query[i].param_key, param_key, strlen(param_key));
-        buf_offset += param_key_len + 1;  // for '='
+        strncpy(http_query[i].key, key, strlen(key));
+        buf_offset += key_len + 1;  // for '='
 
-        strncpy(http_query[i].param_value, value, strlen(value));
-        buf_offset += param_value_len;  // for '&'
+        strncpy(http_query[i].value, value, strlen(value));
+        buf_offset += value_saveptr_len;  // for '&'
 
         i++;
       }
     }
-    param_key = strtok_r(NULL, param_sep, &param_saveptr);
+    key = strtok_r(NULL, param_sep, &key_saveptr);
   }
 
   return buf_offset > 0 ? buf_offset : -1;
 }
 
-ssize_t parse_request(char *recv_buf, ssize_t nb_recv, HTTPCommand *http_cmd,
-                      HTTPHeader *http_hdrs) {
-  int buf_offset, http_status;
-  ssize_t skip;
-  (void)http_status;
-  (void)http_hdrs;
+ssize_t parse_request(char *client_buf, ssize_t nb_recv, HTTPCommand *http_cmd,
+                      HTTPHeader *http_hdrs, size_t *n_hdrs) {
+  int buf_offset, tmp_buf_offset, http_status;
 
-  char line[HTTP_MAXLINE_CMD];
-  skip = http_readline(recv_buf, nb_recv, line);
-
-  if ((buf_offset = parse_command(line, strlen(line), http_cmd)) == -1) {
-    return HTTP_BAD_REQUEST;
+  if ((tmp_buf_offset = parse_command(client_buf, nb_recv, http_cmd)) == -1) {
+    return HTTP_BAD_REQUEST_CODE;
   }
+  buf_offset = tmp_buf_offset;
 
-  (void)skip;
-  // if ((http_status = validate_command(http_cmd)) > 0) {
-  //   fprintf(stderr, "[ERROR] invalid command: %d %s\n", http_status,
-  //           http_status_msg(http_status));
-
-  //   return http_status;
-  // }
+  if ((http_status = validate_method(http_cmd->method)) != 0) {
+    return HTTP_BAD_REQUEST_CODE;
+  }
 
   // more data in headers, so validate command first (could return early)
   // TODO: not sure if i need to return an offset from `parse_headers`
-  // if ((buf_offset += parse_headers(recv_buf + buf_offset, nb_recv,
-  // http_hdrs))
-  //     == -1 ) {
-  //   fprintf(stderr, "[ERROR] unable to parse headers\n");
-
-  //   return HTTP_BAD_REQUEST;
-  // }
+  if ((tmp_buf_offset += parse_headers(
+           client_buf + buf_offset, nb_recv - buf_offset, http_hdrs, n_hdrs)) ==
+      -1) {
+    return HTTP_BAD_REQUEST_CODE;
+  }
 
   // TODO: why would we need to validate headers?
   // if ((http_status = validate_headers(http_hdrs, n_hdrs)) > 0) {
@@ -293,8 +453,8 @@ ssize_t parse_request(char *recv_buf, ssize_t nb_recv, HTTPCommand *http_cmd,
 
 /*
     typedef struct {
-      HTTPHost http_host;
-      HTTPQuery *http_query;
+      HTTPHost host;
+      HTTPQuery *query;
     } HTTPUri;
  */
 ssize_t parse_uri(char *buf, size_t len_buf, HTTPUri *http_uri) {
@@ -302,39 +462,10 @@ ssize_t parse_uri(char *buf, size_t len_buf, HTTPUri *http_uri) {
 
   buf += skip_scheme(buf);
 
-  skip = parse_host(buf, len_buf, &(http_uri->http_host));
-  skip += parse_query(buf + skip, http_uri->http_query);
+  skip = parse_host(buf, len_buf, &(http_uri->host));
+  skip += parse_query(buf + skip, http_uri->query);
 
   return skip;
-}
-
-void print_command(HTTPCommand http_cmd) {
-  fprintf(stderr, "[INFO]\nHTTPCommand {\n");
-
-  fprintf(stderr, "  Method: %s\n", http_cmd.method);
-  fprintf(stderr, "  HTTPUri {\n");
-  fprintf(stderr, "    HTTPHost {\n");
-  fprintf(stderr, "      hostname: %s\n", http_cmd.http_uri.http_host.hostname);
-  fprintf(stderr, "      port: %s\n", http_cmd.http_uri.http_host.port);
-  fprintf(stderr, "      remote_uri: %s\n",
-          http_cmd.http_uri.http_host.remote_uri);
-  fprintf(stderr, "    }\n");
-  fprintf(stderr, "    HTTPQuery {\n");
-
-  for (size_t i = 0; *(http_cmd.http_uri.http_query[i].param_key) != '\0';
-       ++i) {
-    fprintf(stderr, "      key: %s\n",
-            http_cmd.http_uri.http_query[i].param_key);
-    fprintf(stderr, "      value: %s\n",
-            http_cmd.http_uri.http_query[i].param_value);
-  }
-
-  fprintf(stderr, "    }\n");
-  fprintf(stderr, "  }\n");
-  fprintf(stderr, "  version: %s\n", http_cmd.version);
-  fprintf(stderr, "}\n");
-
-  fflush(stderr);
 }
 
 char *proxy_recv(int sockfd, ssize_t *nb_recv) {
@@ -427,8 +558,8 @@ ssize_t read_until(char *haystack, size_t len_haystack, char end, char *sink,
     haystack += 1;
   }
 
-  // up to the length of the input buffer, read as many characters are allowed
-  // in `sink`
+  // up to the length of the input buffer, read as many characters that are
+  // allowed in `sink`
   size_t i;
   for (i = 0; i < len_haystack && i < len_sink && haystack[i] != end; ++i) {
     sink[i] = haystack[i];
@@ -441,7 +572,8 @@ ssize_t read_until(char *haystack, size_t len_haystack, char end, char *sink,
 
   sink[i] = '\0';
 
-  // move pointer to next field of http status line
+  // move pointer to next field of http status line for all fields but the uri
+  // when end='/', retain current position
   return end != '/' ? (ssize_t)i + 1 : (ssize_t)i;
 }
 
@@ -458,26 +590,33 @@ char *realloc_buf(char *buf, size_t size) {
   return buf;
 }
 
-int send_err(int sockfd, const char *fpath, size_t http_status_code) {
+int send_err(int sockfd, size_t http_status_code) {
+  const char *err_file;
   char *send_buf, *file_contents;
+  char headers[HTTP_MAX_ERR_HEADER + 1];
   ssize_t nb_sent;
-  size_t nb_read, len_headers;
+  size_t nb_read, len_send_buf, len_headers;
 
-  if ((file_contents = read_file(fpath, &nb_read)) == NULL) {
+  switch (http_status_code) {
+    case HTTP_BAD_REQUEST_CODE:
+      err_file = HTML_400;
+      break;
+    case HTTP_NOT_FOUND_CODE:
+      err_file = HTML_404;
+      break;
+    default:
+      fprintf(stderr, "[FATAL] this code should be unreachable\n");
+  }
+
+  if ((file_contents = read_file(err_file, &nb_read)) == NULL) {
 #ifdef DEBUG
-    fprintf(stderr, "[INFO] unable to read file %s\n", fpath);
+    fprintf(stderr, "[INFO] unable to read file %s\n", err_file);
 #endif
     return -1;
   }
 
   // build headers
-  // http_version http_code http_message\r\n
-  // Content-Type: text/html\r\n
-  // Content-Length: %zu\r\n
-  // \r\n
-  // <html>...</html>
-  char headers[HTTP_MAX_ERR_HEADER];
-  snprintf(headers, sizeof(headers),
+  snprintf(headers, HTTP_MAX_ERR_HEADER,
            "HTTP/1.1 %zu %s\r\n"
            "Content-Type: text/html\r\n"
            "Content-Length: %zu\r\n"
@@ -491,15 +630,13 @@ int send_err(int sockfd, const char *fpath, size_t http_status_code) {
     exit(EXIT_FAILURE);
   }
 
-  strncpy(send_buf, headers, len_headers);
-  send_buf[len_headers] = '\0';
+  strncpy(send_buf, headers, len_headers + 1);  // +1 to copy '\0', needed by
+                                                // `strncat`
   strncat(send_buf, file_contents, nb_read);
+  len_send_buf = len_headers + nb_read;
 
-  if ((size_t)(nb_sent = proxy_send(sockfd, file_contents, nb_read)) !=
-      nb_read) {
-#ifdef DEBUG
-    fprintf(stderr, "[ERROR] incomplete send of %s\n", fpath);
-#endif
+  if ((size_t)(nb_sent = proxy_send(sockfd, send_buf, len_send_buf)) !=
+      len_send_buf) {
     free(file_contents);
     free(send_buf);
 
@@ -516,9 +653,57 @@ size_t skip_scheme(char *buf) {
   size_t i;
 
   i = 0;
-  while (buf[i] != '/') {
-    i++;
+  while (buf[i++] != '/') {
   }
 
-  return i + 2;
+  return i + 1;  // move past second '/'
+}
+
+int validate_method(char *method) {
+  return (strncmp(method, "GET", strlen("GET")) != 0 ? HTTP_BAD_REQUEST_CODE
+                                                     : 0);
+}
+
+// === DEBUG FUNCTIONS ===
+void print_command(HTTPCommand http_cmd) {
+  fprintf(stderr, "\nHTTPCommand {\n");
+
+  fprintf(stderr, "  Method: %s\n", http_cmd.method);
+  fprintf(stderr, "  HTTPUri {\n");
+  fprintf(stderr, "    HTTPHost {\n");
+  fprintf(stderr, "      hostname: %s\n", http_cmd.uri.host.hostname);
+  fprintf(stderr, "      port: %s\n", http_cmd.uri.host.port);
+  fprintf(stderr, "      remote_uri: %s\n", http_cmd.uri.host.remote_uri);
+  fprintf(stderr, "    }\n");
+  fprintf(stderr, "    HTTPQuery {\n");
+
+  for (size_t i = 0; *(http_cmd.uri.query[i].key) != '\0'; ++i) {
+    fprintf(stderr, "      key: %s\n", http_cmd.uri.query[i].key);
+    fprintf(stderr, "      value: %s\n", http_cmd.uri.query[i].value);
+  }
+
+  fprintf(stderr, "    }\n");
+  fprintf(stderr, "  }\n");
+  fprintf(stderr, "  version: %s\n", http_cmd.version);
+  fprintf(stderr, "}\n");
+
+  fflush(stderr);
+}
+
+void print_header(HTTPHeader http_hdr) {
+  fprintf(stderr, "  %s: %s\n", http_hdr.key, http_hdr.value);
+}
+
+void print_headers(HTTPHeader *http_hdrs, size_t n_hdrs) {
+  fprintf(stderr, "\nHTTPHeaders {\n");
+  for (size_t i = 0; i < n_hdrs; ++i) {
+    print_header(http_hdrs[i]);
+  }
+  fprintf(stderr, "}\n");
+}
+
+void print_request(HTTPHeader *http_hdrs, size_t n_hdrs, HTTPCommand http_cmd) {
+  fprintf(stderr, "[INFO] received request:\n");
+  print_command(http_cmd);
+  print_headers(http_hdrs, n_hdrs);
 }
