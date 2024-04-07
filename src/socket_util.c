@@ -24,9 +24,20 @@ int connection_sockfd(const char *hostname, const char *port) {
       continue;
     }
 
+    /*
+     * EINPROGRESS
+         The socket is nonblocking and the connection cannot be completed
+       immediately. (UNIX domain sockets failed with EAGAIN instead.) It is
+       possible to select(2) or poll(2) for completion by selecting the socket
+       for writing. After select(2) indicates writability, use getsockopt(2) to
+       read the SO_ERROR option at level SOL_SOCKET to determine whether
+       connect() completed successfully (SO_ERROR is zero) or unsuccessfully
+       (SO_ERROR  is one of the usual error codes listed here, explaining the
+       reason for the failure).
+     */
+    fprintf(stderr, "[INFO] connecting to %s:%s\n", hostname, port);
     if (connect(sockfd, srv_entry->ai_addr, srv_entry->ai_addrlen) < 0) {
       close(sockfd);
-      perror("connect");
       continue;
     }
 
@@ -111,11 +122,11 @@ int is_valid_port(const char *arg) {
   return (port >= 1024 && port <= 65535);
 }
 
-void set_timeout(int sockfd) {
+void set_timeout(int sockfd, long tv_sec, long tv_usec) {
   struct timeval rcvtimeo;
 
-  rcvtimeo.tv_sec = 0;
-  rcvtimeo.tv_usec = RCVTIMEO_USEC;
+  rcvtimeo.tv_sec = tv_sec;
+  rcvtimeo.tv_usec = tv_usec;
   if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &rcvtimeo, sizeof(rcvtimeo)) <
       0) {
     perror("setsockopt");
