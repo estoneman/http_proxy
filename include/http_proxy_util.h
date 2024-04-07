@@ -6,10 +6,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define CACHE_BASE "./cache/"
 #define CRLF "\r\n"
+#define HASH_LEN 16
 #define HTML_400 "./err/400.html"
 #define HTML_404 "./err/404.html"
 
+#define HTTP_FNAME_MAX 4096
 #define HTTP_HEADER_KEY_MAX 64
 #define HTTP_HEADER_VALUE_MAX 1024
 #define HTTP_HEADERS_MAX 32
@@ -68,13 +71,30 @@ typedef struct {
   ssize_t len_response;
 } HTTPProxyState;
 
+typedef struct {
+  int sockfd;
+  char *send_buf;
+  ssize_t len_send_buf;
+  char *recv_buf;
+  ssize_t len_recv_buf;
+} HTTPData;
+
+typedef struct {
+  char fpath[HTTP_FNAME_MAX];
+  char uri[HTTP_URI_MAX];
+  char *response;
+  ssize_t len_response;
+} HTTPCache;
+
 char *alloc_buf(size_t);
-void *async_forward_request(void *request);
-void *async_forward_response(void *response);
+void *async_cache_response(void *);
+void *async_forward_request(void *);
+void *async_prefetch_response(void *);
 char *build_request(HTTPCommand *, HTTPHeader **, size_t, size_t *);
 int chk_alloc_err(void *, const char *, const char *, int);
 ssize_t find_crlf(char *, size_t);
 void handle_connection(int);
+unsigned long hash_djb2(char *);
 ssize_t http_readline(char *, size_t, char *);
 const char *http_status_msg(int);
 ssize_t parse_command(char *, size_t, HTTPCommand *);
@@ -90,6 +110,7 @@ ssize_t read_until(char *, size_t, char, char *, size_t);
 char *realloc_buf(char *, size_t size);
 int send_err(int, size_t);
 size_t skip_scheme(char *);
+size_t strnins(char *dst, const char *src, size_t n);
 int validate_method(char *);
 
 // debug
