@@ -1,3 +1,5 @@
+cache/
 out/
 test/
+*.html
 TODO.md
