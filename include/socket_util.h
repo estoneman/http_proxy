@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <openssl/sha.h>
@@ -22,7 +23,8 @@
 #define MAX_PORT 65535
 
 #define MAX_RECV_SZ (RECV_CHUNK_SZ * 1000)
-#define RCVTIMEO_USEC (100 * 1000)
+#define RCVTIMEO_SEC 5
+#define RCVTIMEO_USEC (50 * 1000)
 #define RECV_CHUNK_SZ 1024
 
 int connection_sockfd(const char *, const char *);
@@ -30,7 +32,7 @@ int listen_sockfd(const char *);
 void *get_inetaddr(struct sockaddr *);
 void get_ipstr(char *, struct sockaddr *);
 int is_valid_port(const char *);
-void set_timeout(int);
+void set_timeout(int, long, long);
 
 // debug
 
