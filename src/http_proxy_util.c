@@ -4,7 +4,15 @@
 
 #include "../include/socket_util.h"
 
+/* v1 */
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+static int data_available = 0;
+
+/* v2 */
+static pthread_mutex_t buf_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t buf_cond = PTHREAD_COND_INITIALIZER;
+static int buf_available = 0;
 
 char *alloc_buf(size_t size) {
   char *buf;
@@ -17,51 +25,134 @@ char *alloc_buf(size_t size) {
   return buf;
 }
 
+/*
+ * typedef struct {
+ *   int sockfd;
+ *   char *send_buf;
+ *   size_t len_send_buf;
+ *   char *recv_buf;
+ *   size_t len_recv_buf;
+ * } HTTPData;
+ */
+void *async_proxy_send(void *data) {
+  HTTPData *http_data = (HTTPData *)data;
+  ssize_t bytes_sent;
+
+  if ((bytes_sent = proxy_send(http_data->sockfd, http_data->send_buf,
+                               http_data->len_send_buf)) !=
+      http_data->len_send_buf) {
+    fprintf(stderr, "[ERROR] incomplete send\n");
+  }
+
+  return NULL;
+}
+
+void *async_proxy_recv(void *data) {
+  HTTPData *http_data = (HTTPData *)data;
+
+  pthread_mutex_lock(&buf_mutex);
+  http_data->recv_buf =
+      proxy_recv(http_data->sockfd, &(http_data->len_recv_buf));
+
+  buf_available = 1;
+  pthread_cond_broadcast(&buf_cond);
+  pthread_mutex_unlock(&buf_mutex);
+
+  return NULL;
+}
+
 void *async_forward_request(void *request) {
   HTTPProxyState *state = (HTTPProxyState *)request;
   ssize_t nb_sent;
 
   pthread_mutex_lock(&mutex);
-
   if ((nb_sent = proxy_send(state->origin_sockfd, state->request,
                             state->len_request)) != state->len_request) {
 #ifdef DEBUG
     fprintf(stderr, "[ERROR] incomplete request forward (%zd != %zd)\n",
             nb_sent, state->len_request);
+    fflush(stderr);
 #endif
 
-    free(state->request);
+    close(state->origin_sockfd);
+
+    data_available = 1;
+    pthread_cond_broadcast(&cond);
+    pthread_mutex_unlock(&mutex);
+
     return NULL;
   }
-  free(state->request);
 
   if ((state->response =
            proxy_recv(state->origin_sockfd, &(state->len_response))) == NULL) {
+#ifdef DEBUG
+    fprintf(stderr, "[ERROR] failed to receive from origin http server\n");
+    fflush(stderr);
+#endif
+    close(state->origin_sockfd);
+
+    data_available = 1;
+    pthread_cond_broadcast(&cond);
+    pthread_mutex_unlock(&mutex);
+
     return NULL;
   }
 
+  close(state->origin_sockfd);
+
+  data_available = 1;
+  pthread_cond_broadcast(&cond);
   pthread_mutex_unlock(&mutex);
 
   return NULL;
 }
 
-void *async_forward_response(void *response) {
-  HTTPProxyState *state = (HTTPProxyState *)response;
-  ssize_t nb_sent;
+void *async_cache_response(void *data) {
+  HTTPCache *cache_info = (HTTPCache *)data;
 
-  pthread_mutex_lock(&mutex);
+  while (!buf_available) {
+    pthread_cond_wait(&buf_cond, &buf_mutex);
+  }
 
-  if ((nb_sent = proxy_send(state->client_sockfd, state->response,
-                            state->len_response)) != state->len_response) {
-#ifdef DEBUG
-    fprintf(stderr, "[ERROR] incomplete request forward (%zd != %zd)\n",
-            nb_sent, state->len_request);
-#endif
+  FILE *cache_fp;
+  size_t bytes_written;
+
+  fprintf(stderr, "[INFO] fpath = %s\n", cache_info->fpath);
+  fprintf(stderr, "[INFO] uri %s (len=%zu)\n", cache_info->uri,
+          cache_info->len_response);
+
+  if ((cache_fp = fopen(cache_info->fpath, "wb")) == NULL) {
+    fprintf(stderr, "[ERROR] unable to open file: %s\n", cache_info->fpath);
+    fprintf(stderr, "  REASON: %s\n", strerror(errno));
 
     return NULL;
   }
 
+  if ((bytes_written = fwrite(cache_info->response, sizeof(char),
+                              cache_info->len_response, cache_fp)) !=
+      (size_t)cache_info->len_response) {
+    fprintf(stderr, "[ERROR] incomplete write of file '%s'\n", cache_info->fpath);
+
+    fclose(cache_fp);
+    return NULL;
+  }
+
+  fclose(cache_fp);
+
+  return NULL;
+}
+
+void *async_prefetch_response(void *response) {
+  HTTPProxyState *state = (HTTPProxyState *)response;
+
+  pthread_mutex_lock(&mutex);
+  while (!data_available) {
+    pthread_cond_wait(&cond, &mutex);
+  }
   pthread_mutex_unlock(&mutex);
+
+  fprintf(stderr, "[%s] i have access to all %zu bytes of the data\n", __func__,
+          state->len_response);
 
   return NULL;
 }
@@ -88,7 +179,7 @@ char *build_request(HTTPCommand *http_cmd, HTTPHeader **http_hdrs,
 
   *len_request = 0;
 
-  // recreate header buffer
+  // recreate uri in context of a normal GET request
   len_uri = 0;
   len_uri +=
       snprintf(uri, sizeof(http_cmd->uri), "%s", http_cmd->uri.host.remote_uri);
@@ -107,6 +198,7 @@ char *build_request(HTTPCommand *http_cmd, HTTPHeader **http_hdrs,
   *len_request += snprintf(request_buf, HTTP_MAXLINE_CMD, "%s %s %s\r\n",
                            http_cmd->method, uri, http_cmd->version);
 
+  // recreate header buffer
   char key[HTTP_HEADER_KEY_MAX], value[HTTP_HEADER_VALUE_MAX];
   for (size_t i = 0; i < n_hdrs; ++i) {
     strncpy(key, (*http_hdrs)[i].key, strlen((*http_hdrs)[i].key) + 1);
@@ -155,84 +247,153 @@ ssize_t find_crlf(char *buf, size_t len_buf) {
 }
 
 void handle_connection(int client_sockfd) {
-  char *client_buf, *request_buf;
-  int parse_rc, origin_sockfd;
-  ssize_t nb_recv;
-  size_t n_hdrs, len_request;
+  pthread_t tid_recv, tid_forward_request, tid_forward_response, tid_cache_response;;
+
+  HTTPData data;
   HTTPCommand http_cmd;
   HTTPHeader *http_hdrs;
-  HTTPProxyState state;
-  pthread_t request_thread, response_thread;
 
-  if ((client_buf = proxy_recv(client_sockfd, &nb_recv)) == NULL) {
-    exit(EXIT_FAILURE);  // child exit
+  size_t n_hdrs, len_uri, len_request;
+  int parse_rc, origin_sockfd;
+
+  HTTPCache cache_info;
+  unsigned long hash;
+  char *str_hash;
+
+  // recv from client
+  data.sockfd = client_sockfd;
+  if (pthread_create(&tid_recv, NULL, async_proxy_recv, &data) < 0) {
+    fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+            __LINE__ - 1);
+    exit(EXIT_FAILURE);
   }
 
-#ifdef DEBUG
-  fprintf(stderr, "[INFO] received %zd bytes\n", nb_recv);
-  fflush(stderr);
-#endif
+  pthread_join(tid_recv, NULL);
+  if (data.recv_buf == NULL) {
+    exit(EXIT_FAILURE);
+  }
 
   http_hdrs = malloc(HTTP_HEADERS_MAX * sizeof(HTTPHeader));
   chk_alloc_err(http_hdrs, "malloc", __func__, __LINE__ - 1);
 
-  if ((parse_rc = parse_request(client_buf, nb_recv, &http_cmd, http_hdrs,
-                                &n_hdrs)) != 0) {
-    if (send_err(client_sockfd, parse_rc) < 0) {
-      free(client_buf);
-      free(http_hdrs);
-
-      return;
+  if ((parse_rc = parse_request(data.recv_buf, data.len_recv_buf, &http_cmd,
+                                http_hdrs, &n_hdrs)) != 0) {
+    if (send_err(data.sockfd, parse_rc) < 0) {
+      fprintf(stderr, "[ERROR] unable to send error (%d) response\n", parse_rc);
     }
-    free(client_buf);
+
+    free(data.recv_buf);
     free(http_hdrs);
 
-    return;
+    exit(EXIT_SUCCESS);
   }
 
-  free(client_buf);
+  free(data.recv_buf);
 
+  // connect to origin server
   if ((origin_sockfd = connection_sockfd(http_cmd.uri.host.hostname,
                                          http_cmd.uri.host.port)) == -1) {
     // could not create socket to connect to origin server
     if (send_err(client_sockfd, HTTP_NOT_FOUND_CODE) < 0) {
       free(http_hdrs);
-      exit(EXIT_FAILURE);
+      exit(EXIT_FAILURE);  // server error
     }
+
+    free(http_hdrs);
 
     return;
   }
 
-  request_buf = build_request(&http_cmd, &http_hdrs, n_hdrs, &len_request);
+  data.sockfd = origin_sockfd;
+  data.send_buf = build_request(&http_cmd, &http_hdrs, n_hdrs, &len_request);
+  data.len_send_buf = len_request;
 
-  // initialize thread state
-  state.client_sockfd = client_sockfd, state.origin_sockfd = origin_sockfd,
-  state.request = request_buf;
-  state.len_request = len_request;
-  state.response = NULL;
-  state.len_response = -1;
+  // send to origin server
+  if (pthread_create(&tid_forward_request, NULL, async_proxy_send, &data) < 0) {
+    fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+            __LINE__ - 1);
+    exit(EXIT_FAILURE);
+  }
 
-  if (pthread_create(&request_thread, NULL, async_forward_request, &state) <
+  // recv from origin server
+  if (pthread_create(&tid_recv, NULL, async_proxy_recv, &data) < 0) {
+    fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+            __LINE__ - 1);
+    exit(EXIT_FAILURE);
+  }
+  pthread_join(tid_recv, NULL);
+  free(data.send_buf);
+
+  // send response to client
+  data.sockfd = client_sockfd;
+  data.send_buf = data.recv_buf;
+  data.len_send_buf = data.len_recv_buf;
+  if (pthread_create(&tid_forward_response, NULL, async_proxy_send, &data) <
       0) {
     fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
             __LINE__ - 1);
     exit(EXIT_FAILURE);
   }
 
-  if (pthread_create(&response_thread, NULL, async_forward_response, &state) <
-      0) {
+  len_uri = 0;
+  len_uri += snprintf(cache_info.uri, sizeof(http_cmd.uri), "%s",
+                      http_cmd.uri.host.remote_uri);
+
+  // query
+  for (size_t i = 0; *(http_cmd.uri.query[i].key) != '\0'; ++i) {
+    if (i == 0)
+      len_uri +=
+          snprintf(cache_info.uri + len_uri, sizeof(char) + 1, "%c", '?');
+    else
+      len_uri +=
+          snprintf(cache_info.uri + len_uri, sizeof(char) + 1, "%c", '&');
+
+    len_uri += snprintf(cache_info.uri + len_uri,
+                        strlen(http_cmd.uri.query[i].key) + 2,
+                        "%s=", http_cmd.uri.query[i].key);
+    len_uri += snprintf(cache_info.uri + len_uri,
+                        strlen(http_cmd.uri.query[i].value) + 1, "%s",
+                        http_cmd.uri.query[i].value);
+  }
+
+  str_hash = alloc_buf(HASH_LEN + 1);
+
+  hash = hash_djb2(cache_info.uri);
+  snprintf(str_hash, HASH_LEN, "%lx", hash);
+
+  strncpy(cache_info.fpath, str_hash, strlen(str_hash));
+  strnins(cache_info.fpath, CACHE_BASE, strlen(CACHE_BASE));
+
+  cache_info.response = data.recv_buf;
+  cache_info.len_response = data.len_recv_buf;
+
+  if (pthread_create(&tid_cache_response, NULL, async_cache_response,
+                     &cache_info) < 0) {
     fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
             __LINE__ - 1);
     exit(EXIT_FAILURE);
   }
 
-  pthread_join(request_thread, NULL);
-  pthread_join(response_thread, NULL);
+  // prefetch response
 
-  free(state.response);
+  pthread_join(tid_forward_request, NULL);
+  pthread_join(tid_forward_response, NULL);
+  pthread_join(tid_cache_response, NULL);
+
+  free(str_hash);
+  free(data.recv_buf);
   free(http_hdrs);
+}
 
-  close(origin_sockfd);
+unsigned long hash_djb2(char *s) {
+  unsigned long hash = 5381;
+  int c;
+
+  while ((c = *s++)) {
+    hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+  }
+
+  return hash;
 }
 
 ssize_t http_readline(char *buf, size_t len_buf, char *out_buf) {
@@ -457,6 +618,7 @@ ssize_t parse_request(char *client_buf, ssize_t nb_recv, HTTPCommand *http_cmd,
       HTTPQuery *query;
     } HTTPUri;
  */
+// TODO: error when using https instead of http as scheme
 ssize_t parse_uri(char *buf, size_t len_buf, HTTPUri *http_uri) {
   ssize_t skip;
 
@@ -480,7 +642,7 @@ char *proxy_recv(int sockfd, ssize_t *nb_recv) {
 
   bytes_alloced = RECV_CHUNK_SZ;
 
-  set_timeout(sockfd);
+  set_timeout(sockfd, 0, RCVTIMEO_USEC);
 
   total_nb_recv = 0;
   num_reallocs = 1;
@@ -500,13 +662,18 @@ char *proxy_recv(int sockfd, ssize_t *nb_recv) {
     }
   }
 
-  if (total_nb_recv == 0) {
-    // someone connected, but did not send us data
+  *nb_recv = total_nb_recv;
+
+  if (total_nb_recv == 0) {  // timeout
+    perror("recv");
     free(recv_buf);
     return NULL;
   }
 
-  *nb_recv = total_nb_recv;
+#ifdef DEBUG
+  fprintf(stderr, "[%s] received %zd bytes\n", __func__, *nb_recv);
+  fflush(stderr);
+#endif
 
   return recv_buf;
 }
@@ -514,6 +681,7 @@ char *proxy_recv(int sockfd, ssize_t *nb_recv) {
 ssize_t proxy_send(int sockfd, char *send_buf, size_t len_send_buf) {
   ssize_t nb_sent;
 
+  fprintf(stderr, "[%s] sending %zu bytes\n", __func__, len_send_buf);
   if ((nb_sent = send(sockfd, send_buf, len_send_buf, 0)) < 0) {
     perror("send");
     return -1;
@@ -594,7 +762,6 @@ int send_err(int sockfd, size_t http_status_code) {
   const char *err_file;
   char *send_buf, *file_contents;
   char headers[HTTP_MAX_ERR_HEADER + 1];
-  ssize_t nb_sent;
   size_t nb_read, len_send_buf, len_headers;
 
   switch (http_status_code) {
@@ -635,33 +802,59 @@ int send_err(int sockfd, size_t http_status_code) {
   strncat(send_buf, file_contents, nb_read);
   len_send_buf = len_headers + nb_read;
 
-  if ((size_t)(nb_sent = proxy_send(sockfd, send_buf, len_send_buf)) !=
-      len_send_buf) {
-    free(file_contents);
-    free(send_buf);
+  pthread_t tid_send_err;
 
-    return -1;
+  HTTPData data;
+  data.sockfd = sockfd;
+  data.send_buf = send_buf;
+  data.len_send_buf = len_send_buf;
+
+  if (pthread_create(&tid_send_err, NULL, async_proxy_send, &data) < 0) {
+    fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+            __LINE__ - 1);
+    exit(EXIT_FAILURE);
   }
 
+  pthread_join(tid_send_err, NULL);
+
   free(file_contents);
-  free(send_buf);
+  free(data.send_buf);
 
   return 0;
 }
 
 size_t skip_scheme(char *buf) {
-  size_t i;
+  size_t i, len_buf;
 
   i = 0;
-  while (buf[i++] != '/') {
+  len_buf = strlen(buf);
+  while (i < len_buf && buf[i] != '/') {
+    i++;
   }
 
-  return i + 1;  // move past second '/'
+  return i == len_buf ? 0 : i + 2;  // move past second '/'
+}
+
+size_t strnins(char *dst, const char *src, size_t n) {
+  size_t src_len, dst_len;
+
+  src_len = strlen(src);
+  dst_len = strlen(dst);
+
+  if (n > src_len) {
+    n = src_len;
+  }
+
+  char tmp[dst_len + n + 1];
+  strncpy(tmp, dst, dst_len);
+  strncpy(dst, src, src_len);
+  strncpy(dst + src_len, tmp, dst_len);
+
+  return n;
 }
 
 int validate_method(char *method) {
-  return (strncmp(method, "GET", strlen("GET")) != 0 ? HTTP_BAD_REQUEST_CODE
-                                                     : 0);
+  return strncmp(method, "GET", strlen("GET"));
 }
 
 // === DEBUG FUNCTIONS ===
