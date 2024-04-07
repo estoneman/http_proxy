@@ -12,7 +12,7 @@
 #define HTML_400 "./err/400.html"
 #define HTML_404 "./err/404.html"
 
-#define HTTP_FNAME_MAX 4096
+#define HTTP_FNAME_MAX sizeof(CACHE_BASE) + HASH_LEN + 1
 #define HTTP_HEADER_KEY_MAX 64
 #define HTTP_HEADER_VALUE_MAX 1024
 #define HTTP_HEADERS_MAX 32
@@ -63,33 +63,24 @@ typedef struct {
 } HTTPHeader;
 
 typedef struct {
-  int client_sockfd;
-  int origin_sockfd;
-  char *request;
-  ssize_t len_request;
-  char *response;
-  ssize_t len_response;
-} HTTPProxyState;
-
-typedef struct {
   int sockfd;
-  char *send_buf;
-  ssize_t len_send_buf;
-  char *recv_buf;
-  ssize_t len_recv_buf;
-} HTTPData;
+  char *data;
+  ssize_t len_data;
+} SocketBuffer;
 
 typedef struct {
   char fpath[HTTP_FNAME_MAX];
   char uri[HTTP_URI_MAX];
-  char *response;
-  ssize_t len_response;
-} HTTPCache;
+  char *data;
+  ssize_t len_data;
+} ProxyCache;
 
 char *alloc_buf(size_t);
+void *async_cache_get(void *);
 void *async_cache_response(void *);
-void *async_forward_request(void *);
 void *async_prefetch_response(void *);
+void *async_proxy_send(void *);
+void *async_proxy_recv(void *);
 char *build_request(HTTPCommand *, HTTPHeader **, size_t, size_t *);
 int chk_alloc_err(void *, const char *, const char *, int);
 ssize_t find_crlf(char *, size_t);
@@ -108,6 +99,7 @@ ssize_t proxy_send(int, char *, size_t);
 char *read_file(const char *, size_t *);
 ssize_t read_until(char *, size_t, char, char *, size_t);
 char *realloc_buf(char *, size_t size);
+void rebuild_uri(char *, HTTPCommand *, int);
 int send_err(int, size_t);
 size_t skip_scheme(char *);
 size_t strnins(char *dst, const char *src, size_t n);
