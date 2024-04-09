@@ -7,6 +7,9 @@
 /* thread access management */
 static pthread_mutex_t data_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t data_cond = PTHREAD_COND_INITIALIZER;
+// static pthread_rwlock_t = PTHREAD_RWLOCK_INITIALIZER; -- could be useful for
+// threads that read from data, but do not need mutually exclusive access to
+// said data
 static int data_available = 0;
 
 char *alloc_buf(size_t size) {
@@ -57,11 +60,9 @@ void *async_cache_response(void *data) {
 void *async_prefetch_response(void *arg) {
   SocketBuffer *socket_buf = (SocketBuffer *)arg;
 
-  pthread_mutex_lock(&data_mutex);
   while (!data_available) {
     pthread_cond_wait(&data_cond, &data_mutex);
   }
-  pthread_mutex_unlock(&data_mutex);
 
   fprintf(stderr, "[%s] i have access to all %zu bytes of the data\n", __func__,
           socket_buf->len_data);
@@ -86,10 +87,29 @@ void *async_proxy_send(void *arg) {
   SocketBuffer *socket_buf = (SocketBuffer *)arg;
   ssize_t bytes_sent;
 
+  while (!data_available) {
+    pthread_cond_wait(&data_cond, &data_mutex);
+  }
+
   if ((bytes_sent = proxy_send(socket_buf->sockfd, socket_buf->data,
                                socket_buf->len_data)) != socket_buf->len_data) {
     fprintf(stderr, "[ERROR] incomplete send\n");
   }
+
+  return NULL;
+}
+
+void *async_read_cache(void *arg) {
+  ProxyCache *pc_read = (ProxyCache *)arg;
+
+  pthread_mutex_lock(&data_mutex);
+
+  fprintf(stderr, "[%s] retrieving request from cache\n", __func__);
+  pc_read->data = read_file(pc_read->fpath, (size_t *)&(pc_read->len_data));
+
+  data_available = 1;
+  pthread_cond_broadcast(&data_cond);
+  pthread_mutex_unlock(&data_mutex);
 
   return NULL;
 }
@@ -168,9 +188,10 @@ ssize_t find_crlf(char *buf, size_t len_buf) {
   return -1;
 }
 
-void handle_connection(int client_sockfd) {
+void handle_connection(int client_sockfd, int cache_timeout) {
   pthread_t tid_recv, tid_forward_request, tid_forward_response,
-      tid_cache_response;
+      tid_cache_response, tid_read_cache;
+  // TODO: pthread_t tid_prefetch_response;
 
   SocketBuffer sb_send;
   SocketBuffer sb_recv;
@@ -184,6 +205,10 @@ void handle_connection(int client_sockfd) {
   ProxyCache pc_write;
   char uri[HTTP_URI_MAX];
   unsigned long hash;
+  int access;
+  struct stat st_cache;
+  struct timespec ts_current;
+  long int diff;
 
   // recv from client
   sb_recv.sockfd = client_sockfd;
@@ -220,7 +245,25 @@ void handle_connection(int client_sockfd) {
   snprintf(pc_read.fpath, HASH_LEN, "%0*lx", HASH_LEN - 1, hash);
   strnins(pc_read.fpath, CACHE_BASE, sizeof(CACHE_BASE));
 
-  if (access(pc_read.fpath, F_OK) != 0) {  // not in cache, fetch it
+  if ((access = stat(pc_read.fpath, &st_cache)) == 0) {
+    // get current time
+    if (clock_gettime(CLOCK_REALTIME, &ts_current) == -1) {
+      perror("clock_gettime");
+    }
+    // calculate difference between current time and st.st_mtim.tv_sec
+    diff = ts_current.tv_sec - st_cache.st_mtim.tv_sec;
+  }
+
+  fprintf(stderr, "[INFO] calculated diff = %ld, cache timeout = %d\n", diff,
+          cache_timeout);
+
+  if (access == -1 || diff > cache_timeout) {  // non-existent or stale cache entry
+    // delete stale entry
+    if (access == 0) {
+      unlink(pc_read.fpath);
+      fprintf(stderr, "[INFO] removed stale entry: %s\n", pc_read.fpath);
+    }
+
     // connect to origin server
     if ((origin_sockfd = connection_sockfd(http_cmd.uri.host.hostname,
                                            http_cmd.uri.host.port)) == -1) {
@@ -265,41 +308,12 @@ void handle_connection(int client_sockfd) {
     pc_write.data = sb_recv.data;
     pc_write.len_data = sb_recv.len_data;
   } else {  // in cache, retrieve it
-    // open file
-    FILE *cache_fp;
-    struct stat st;
-
-    fprintf(stderr, "[INFO] retrieving %s from cache\n",
-            http_cmd.uri.host.remote_uri);
-
-    if ((cache_fp = fopen(pc_read.fpath, "rb")) == NULL) {
-      fprintf(stderr, "[ERROR] unable to open file: %s\n", pc_read.fpath);
-
+    if (pthread_create(&tid_read_cache, NULL, async_read_cache, &pc_read) < 0) {
+      fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+              __LINE__ - 1);
       exit(EXIT_FAILURE);
     }
-
-    // get file size
-    if (stat(pc_read.fpath, &st) != 0) {
-      fprintf(stderr, "[ERROR] unable to stat file: %s\n", pc_read.fpath);
-      fclose(cache_fp);
-
-      exit(EXIT_FAILURE);
-    }
-
-    pc_read.data = alloc_buf(st.st_size);
-    chk_alloc_err(pc_read.data, "malloc", __func__, __LINE__ - 1);
-
-    // read file
-    if ((pc_read.len_data = fread(pc_read.data, sizeof(char), st.st_size,
-                                  cache_fp)) != st.st_size) {
-      fprintf(stderr, "[ERROR] incomplete read of file: %s\n", pc_read.fpath);
-      fclose(cache_fp);
-
-      exit(EXIT_FAILURE);
-    }
-
-    // close file
-    fclose(cache_fp);
+    pthread_join(tid_read_cache, NULL);
 
     sb_send.data = pc_read.data;
     sb_send.len_data = pc_read.len_data;
@@ -330,14 +344,14 @@ void handle_connection(int client_sockfd) {
       exit(EXIT_FAILURE);
     }
 
-    // TODO: join only when it is run but not inside if, don't want to block
-    pthread_join(tid_cache_response, NULL);
   }
 
   // prefetch response
 
   pthread_join(tid_forward_request, NULL);
   pthread_join(tid_forward_response, NULL);
+  pthread_join(tid_cache_response, NULL);
+  // TODO: pthread_join(tid_prefetch_response, NULL);
 
   free(sb_send.data);
   if (free_recv_buf == 1) {
@@ -664,6 +678,7 @@ char *read_file(const char *fpath, size_t *nb_read) {
   if (stat(fpath, &st) < 0) {
     // server error
     fclose(fp);
+
     return NULL;
   }
 
