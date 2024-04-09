@@ -257,7 +257,8 @@ void handle_connection(int client_sockfd, int cache_timeout) {
   fprintf(stderr, "[INFO] calculated diff = %ld, cache timeout = %d\n", diff,
           cache_timeout);
 
-  if (access == -1 || diff > cache_timeout) {  // non-existent or stale cache entry
+  if (access == -1 ||
+      diff > cache_timeout) {  // non-existent or stale cache entry
     // delete stale entry
     if (access == 0) {
       unlink(pc_read.fpath);
@@ -343,7 +344,6 @@ void handle_connection(int client_sockfd, int cache_timeout) {
               __LINE__ - 1);
       exit(EXIT_FAILURE);
     }
-
   }
 
   // prefetch response

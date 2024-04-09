@@ -38,7 +38,7 @@ int main(int argc, char *argv[]) {
     usage(argv[0]);
     exit(EXIT_FAILURE);
   } else if (argc > 2) {
-    cache_timeout = atoi(argv[2]); 
+    cache_timeout = atoi(argv[2]);
   } else if (!is_valid_port(argv[1])) {
     fprintf(stderr, "[ERROR] invalid port specified\n");
     usage(argv[0]);
