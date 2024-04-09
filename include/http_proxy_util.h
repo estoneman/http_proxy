@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #define CACHE_BASE "./cache/"
 #define CRLF "\r\n"
@@ -81,10 +82,11 @@ void *async_cache_response(void *);
 void *async_prefetch_response(void *);
 void *async_proxy_send(void *);
 void *async_proxy_recv(void *);
+void *async_read_cache(void *);
 char *build_request(HTTPCommand *, HTTPHeader **, size_t, size_t *);
 int chk_alloc_err(void *, const char *, const char *, int);
 ssize_t find_crlf(char *, size_t);
-void handle_connection(int);
+void handle_connection(int, int);
 unsigned long hash_djb2(char *);
 ssize_t http_readline(char *, size_t, char *);
 const char *http_status_msg(int);
