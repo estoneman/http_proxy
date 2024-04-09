@@ -9,7 +9,9 @@
 #define PORT_LEN 6
 
 void usage(const char *program) {
-  fprintf(stderr, "usage: %s <port (1024|65535)\n", program);
+  fprintf(stderr,
+          "usage: %s <port (1024|65535)> <cache timeout (default: 60)>\n",
+          program);
 }
 
 void sigchld_handler(int s __attribute__((unused))) {
@@ -22,22 +24,26 @@ void sigchld_handler(int s __attribute__((unused))) {
 }
 
 int main(int argc, char *argv[]) {
-  if (argc < 2) {
-    fprintf(stderr, "[ERROR] not enough arguments supplied\n");
-    usage(argv[0]);
-    exit(EXIT_FAILURE);
-  } else if (!is_valid_port(argv[1])) {
-    fprintf(stderr, "[ERROR] invalid port specified\n");
-    usage(argv[0]);
-    exit(EXIT_FAILURE);
-  }
-
   struct sockaddr_in cliaddr;
   socklen_t cliaddr_len;
   int listenfd, connfd;
   char port[PORT_LEN], ipstr[INET6_ADDRSTRLEN];
   struct sigaction sa;
   pid_t pid;
+  int cache_timeout;
+
+  cache_timeout = 60;
+  if (argc < 2) {
+    fprintf(stderr, "[ERROR] not enough arguments supplied\n");
+    usage(argv[0]);
+    exit(EXIT_FAILURE);
+  } else if (argc > 2) {
+    cache_timeout = atoi(argv[2]); 
+  } else if (!is_valid_port(argv[1])) {
+    fprintf(stderr, "[ERROR] invalid port specified\n");
+    usage(argv[0]);
+    exit(EXIT_FAILURE);
+  }
 
   strcpy(port, argv[1]);
   if ((listenfd = listen_sockfd(port)) == -1) {
@@ -82,7 +88,7 @@ int main(int argc, char *argv[]) {
 
     if (pid == 0) {  // child process
       close(listenfd);
-      handle_connection(connfd);
+      handle_connection(connfd, cache_timeout);
 
       exit(EXIT_SUCCESS);
     } else {  // parent process
