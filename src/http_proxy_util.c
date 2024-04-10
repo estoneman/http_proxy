@@ -5,12 +5,7 @@
 #include "../include/socket_util.h"
 
 /* thread access management */
-static pthread_mutex_t data_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t data_cond = PTHREAD_COND_INITIALIZER;
-// static pthread_rwlock_t = PTHREAD_RWLOCK_INITIALIZER; -- could be useful for
-// threads that read from data, but do not need mutually exclusive access to
-// said data
-static int data_available = 0;
+static pthread_rwlock_t sb_data_rwlock = PTHREAD_RWLOCK_INITIALIZER;
 
 char *alloc_buf(size_t size) {
   char *buf;
@@ -26,9 +21,7 @@ char *alloc_buf(size_t size) {
 void *async_cache_response(void *data) {
   ProxyCache *proxy_cache = (ProxyCache *)data;
 
-  while (!data_available) {
-    pthread_cond_wait(&data_cond, &data_mutex);
-  }
+  pthread_rwlock_rdlock(&sb_data_rwlock);
 
   FILE *cache_fp;
   size_t bytes_written;
@@ -53,6 +46,7 @@ void *async_cache_response(void *data) {
   }
 
   fclose(cache_fp);
+  pthread_rwlock_unlock(&sb_data_rwlock);
 
   return NULL;
 }
@@ -60,12 +54,27 @@ void *async_cache_response(void *data) {
 void *async_prefetch_response(void *arg) {
   SocketBuffer *socket_buf = (SocketBuffer *)arg;
 
-  while (!data_available) {
-    pthread_cond_wait(&data_cond, &data_mutex);
-  }
-
-  fprintf(stderr, "[%s] i have access to all %zu bytes of the data\n", __func__,
-          socket_buf->len_data);
+  pthread_rwlock_rdlock(&sb_data_rwlock);
+  fprintf(stderr, "[INFO] i have access to all %zu bytes\n", socket_buf->len_data);
+  // sum of sizes of all a_tags will always be less than socket_buf->len_data
+  // could create a single character buffer that is delimited by newlines
+  // then loop through each entry and do a async_proxy_recv, async_proxy_send,
+  // and finally a async_cache_response
+  //
+  // pseudocode
+  // http_links = get_http_links()
+  // for http_link in http_links:
+  //   http_link.uri = parse_uri(http_link)
+  //   sockfd = connection_sockfd(origin_sever)
+  //   request = "GET http_link.uri HTTP/1.1\r\n\r\n"
+  //   async_proxy_send(sockfd, request)
+  //   response = async_proxy_recv(sockfd)
+  //   sockfd = client_sockfd
+  //   async_proxy_send(sockfd, response)
+  //
+  //   if query_params not in http_link.uri:
+  //     async_cache_response(response)
+  pthread_rwlock_unlock(&sb_data_rwlock);
 
   return NULL;
 }
@@ -73,12 +82,9 @@ void *async_prefetch_response(void *arg) {
 void *async_proxy_recv(void *arg) {
   SocketBuffer *socket_buf = (SocketBuffer *)arg;
 
-  pthread_mutex_lock(&data_mutex);
+  pthread_rwlock_wrlock(&sb_data_rwlock);
   socket_buf->data = proxy_recv(socket_buf->sockfd, &(socket_buf->len_data));
-
-  data_available = 1;
-  pthread_cond_broadcast(&data_cond);
-  pthread_mutex_unlock(&data_mutex);
+  pthread_rwlock_unlock(&sb_data_rwlock);
 
   return NULL;
 }
@@ -87,14 +93,14 @@ void *async_proxy_send(void *arg) {
   SocketBuffer *socket_buf = (SocketBuffer *)arg;
   ssize_t bytes_sent;
 
-  while (!data_available) {
-    pthread_cond_wait(&data_cond, &data_mutex);
-  }
+  pthread_rwlock_rdlock(&sb_data_rwlock);
 
   if ((bytes_sent = proxy_send(socket_buf->sockfd, socket_buf->data,
                                socket_buf->len_data)) != socket_buf->len_data) {
     fprintf(stderr, "[ERROR] incomplete send\n");
   }
+
+  pthread_rwlock_unlock(&sb_data_rwlock);
 
   return NULL;
 }
@@ -102,14 +108,12 @@ void *async_proxy_send(void *arg) {
 void *async_read_cache(void *arg) {
   ProxyCache *pc_read = (ProxyCache *)arg;
 
-  pthread_mutex_lock(&data_mutex);
+  pthread_rwlock_wrlock(&sb_data_rwlock);
 
   fprintf(stderr, "[%s] retrieving request from cache\n", __func__);
   pc_read->data = read_file(pc_read->fpath, (size_t *)&(pc_read->len_data));
 
-  data_available = 1;
-  pthread_cond_broadcast(&data_cond);
-  pthread_mutex_unlock(&data_mutex);
+  pthread_rwlock_unlock(&sb_data_rwlock);
 
   return NULL;
 }
@@ -141,10 +145,10 @@ char *build_request(HTTPCommand *http_cmd, HTTPHeader **http_hdrs,
                            http_cmd->method, uri, http_cmd->version);
 
   // recreate header buffer
-  char key[HTTP_HEADER_KEY_MAX], value[HTTP_HEADER_VALUE_MAX];
+  char key[HTTP_HEADER_KEY_MAX + 1], value[HTTP_HEADER_VALUE_MAX + 1];
   for (size_t i = 0; i < n_hdrs; ++i) {
-    strncpy(key, (*http_hdrs)[i].key, strlen((*http_hdrs)[i].key) + 1);
-    strncpy(value, (*http_hdrs)[i].value, strlen((*http_hdrs)[i].value) + 1);
+    strncpy(key, (*http_hdrs)[i].key, HTTP_HEADER_KEY_MAX);
+    strncpy(value, (*http_hdrs)[i].value, HTTP_HEADER_VALUE_MAX);
 
     // forward 'Connection' header with same value
     if (strncmp(key, "Proxy-Connection", strlen(key)) == 0) {
@@ -190,8 +194,7 @@ ssize_t find_crlf(char *buf, size_t len_buf) {
 
 void handle_connection(int client_sockfd, int cache_timeout) {
   pthread_t tid_recv, tid_forward_request, tid_forward_response,
-      tid_cache_response, tid_read_cache;
-  // TODO: pthread_t tid_prefetch_response;
+      tid_cache_response, tid_read_cache, tid_prefetch_response;
 
   SocketBuffer sb_send;
   SocketBuffer sb_recv;
@@ -245,6 +248,7 @@ void handle_connection(int client_sockfd, int cache_timeout) {
   snprintf(pc_read.fpath, HASH_LEN, "%0*lx", HASH_LEN - 1, hash);
   strnins(pc_read.fpath, CACHE_BASE, sizeof(CACHE_BASE));
 
+  diff = -1;
   if ((access = stat(pc_read.fpath, &st_cache)) == 0) {
     // get current time
     if (clock_gettime(CLOCK_REALTIME, &ts_current) == -1) {
@@ -301,12 +305,32 @@ void handle_connection(int client_sockfd, int cache_timeout) {
     free_recv_buf = 1;
     pthread_join(tid_recv, NULL);
 
-    // TODO: allocate buffer for sb_send.data
+    // free old sb_send.data
+    free(sb_send.data);
+    
+    // allocate space for socket send buffer
+    if ((sb_send.data = alloc_buf(sb_recv.len_data)) == NULL) {
+      fprintf(stderr, "[FATAL] out of memory\n");
+      free(sb_recv.data);
+
+      exit(EXIT_FAILURE);
+    }
+
+    // copy received bytes to socket send buffer
     memcpy(sb_send.data, sb_recv.data, sb_recv.len_data);  // avoid double-free
     sb_send.len_data = sb_recv.len_data;
 
-    // TODO: allocate buffer for pc_write.data
-    pc_write.data = sb_recv.data;
+    // allocate space for cache write buffer
+    if ((pc_write.data = alloc_buf(sb_recv.len_data)) == NULL) {
+      fprintf(stderr, "[FATAL] out of memory\n");
+      free(sb_send.data);
+      free(sb_recv.data);
+
+      exit(EXIT_FAILURE);
+    }
+
+    // copy received bytes to cache write buffer
+    memcpy(pc_write.data, sb_recv.data, sb_recv.len_data);
     pc_write.len_data = sb_recv.len_data;
   } else {  // in cache, retrieve it
     if (pthread_create(&tid_read_cache, NULL, async_read_cache, &pc_read) < 0) {
@@ -316,9 +340,27 @@ void handle_connection(int client_sockfd, int cache_timeout) {
     }
     pthread_join(tid_read_cache, NULL);
 
-    sb_send.data = pc_read.data;
+    // allocate space for socket send buffer
+    if ((sb_send.data = alloc_buf(pc_read.len_data)) == NULL) {
+      fprintf(stderr, "[FATAL] out of memory\n");
+
+      exit(EXIT_FAILURE);
+    }
+
+    // copy read bytes from cache to socket send buffer
+    memcpy(sb_send.data, pc_read.data, pc_read.len_data);
     sb_send.len_data = pc_read.len_data;
-    pc_write.data = pc_read.data;
+
+    // allocate space for cache write buffer
+    if ((pc_write.data = alloc_buf(pc_read.len_data)) == NULL) {
+      fprintf(stderr, "[FATAL] out of memory\n");
+      free(sb_send.data);
+
+      exit(EXIT_FAILURE);
+    }
+    
+    // copy read bytes from cache to cache write buffer (refreshes cache entry)
+    memcpy(pc_write.data, pc_read.data, pc_read.len_data);
     pc_write.len_data = pc_read.len_data;
 
     free_recv_buf = 0;
@@ -335,7 +377,7 @@ void handle_connection(int client_sockfd, int cache_timeout) {
 
   // cache response
   if (!*(http_cmd.uri.query[0].key)) {  // static content, cache it
-    strncpy(pc_write.fpath, pc_read.fpath, strlen(pc_read.fpath));
+    strncpy(pc_write.fpath, pc_read.fpath, HTTP_FNAME_MAX);
     fprintf(stderr, "[INFO] caching %s\n", pc_write.fpath);
 
     if (pthread_create(&tid_cache_response, NULL, async_cache_response,
@@ -347,17 +389,27 @@ void handle_connection(int client_sockfd, int cache_timeout) {
   }
 
   // prefetch response
+  if (pthread_create(&tid_prefetch_response, NULL, async_prefetch_response,
+                     &sb_send) < 0) {
+    fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+            __LINE__ - 1);
+    exit(EXIT_FAILURE);
+  }
 
   pthread_join(tid_forward_request, NULL);
   pthread_join(tid_forward_response, NULL);
   pthread_join(tid_cache_response, NULL);
-  // TODO: pthread_join(tid_prefetch_response, NULL);
+  pthread_join(tid_prefetch_response, NULL);
 
-  free(sb_send.data);
-  if (free_recv_buf == 1) {
+  free(http_hdrs);
+  if (free_recv_buf == 1) {  // may not have recieved from origin if we went
+                             // straight to cache, didn't allocate, no need to
+                             // free
     free(sb_recv.data);
   }
-  free(http_hdrs);
+  free(sb_send.data);
+  free(pc_write.data);
+  free(pc_read.data);
 }
 
 unsigned long hash_djb2(char *s) {
@@ -540,10 +592,10 @@ ssize_t parse_query(char *buf, HTTPQuery *http_query) {
         size_t key_len = strlen(key);
         size_t value_saveptr_len = strlen(value);
 
-        strncpy(http_query[i].key, key, strlen(key));
+        strncpy(http_query[i].key, key, HTTP_PARAM_KEY_MAX);
         buf_offset += key_len + 1;  // for '='
 
-        strncpy(http_query[i].value, value, strlen(value));
+        strncpy(http_query[i].value, value, HTTP_PARAM_VALUE_MAX);
         buf_offset += value_saveptr_len;  // for '&'
 
         i++;
@@ -683,6 +735,7 @@ char *read_file(const char *fpath, size_t *nb_read) {
   }
 
   out_buf = alloc_buf(st.st_size);
+  chk_alloc_err(out_buf, "malloc", __func__, __LINE__ - 1);
 
   if ((*nb_read = fread(out_buf, 1, st.st_size, fp)) < (size_t)st.st_size) {
     fclose(fp);
@@ -752,16 +805,16 @@ void rebuild_uri(char *uri, HTTPCommand *http_cmd, int include_host) {
   }
 
   // query parameters
-  for (size_t i = 0; *(http_cmd->uri.query[0].key) != '\0'; ++i) {
+  for (size_t i = 0; *(http_cmd->uri.query[i].key) != '\0'; ++i) {
     if (i == 0) {
       len_uri += snprintf(uri + len_uri, sizeof(char) + 1, "%c", '?');
     } else {
       len_uri += snprintf(uri + len_uri, sizeof(char) + 1, "%c", '&');
     }
 
-    len_uri += snprintf(uri + len_uri, strlen(http_cmd->uri.query[i].key) + 1,
+    len_uri += snprintf(uri + len_uri, HTTP_PARAM_KEY_MAX + 1,
                         "%s=", http_cmd->uri.query[i].key);
-    len_uri += snprintf(uri + len_uri, strlen(http_cmd->uri.query[i].value),
+    len_uri += snprintf(uri + len_uri, HTTP_PARAM_VALUE_MAX,
                         "%s", http_cmd->uri.query[i].value);
   }
 }
@@ -782,6 +835,7 @@ int send_err(int sockfd, size_t http_status_code) {
       break;
     default:
       fprintf(stderr, "[FATAL] this code should be unreachable\n");
+      exit(EXIT_FAILURE);
   }
 
   if ((file_contents = read_file(err_file, &nb_read)) == NULL) {
@@ -846,8 +900,8 @@ size_t skip_scheme(char *buf) {
 size_t strnins(char *dst, const char *src, size_t n) {
   size_t src_len, dst_len;
 
-  src_len = strlen(src);
-  dst_len = strlen(dst);
+  src_len = strlen(src) + 1;
+  dst_len = strlen(dst) + 1;
 
   if (n > src_len) {
     n = src_len;
@@ -856,7 +910,7 @@ size_t strnins(char *dst, const char *src, size_t n) {
   char tmp[dst_len + n + 1];
   strncpy(tmp, dst, dst_len);
   strncpy(dst, src, src_len);
-  strncpy(dst + src_len, tmp, dst_len);
+  strncpy(dst + src_len - 1, tmp, dst_len);
 
   return n;
 }
