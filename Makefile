@@ -2,7 +2,7 @@ CC:=$(shell which gcc)
 
 CFLAGS:=-Wall -Werror -Wextra \
 -pedantic -fsanitize=address -DDEBUG \
--fanalyzer -g -std=gnu11
+-fanalyzer -O3 -g -std=gnu11
 
 INCLUDE:=include/
 LDFLAGS:=-lm -pthread
