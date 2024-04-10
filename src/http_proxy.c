@@ -6,6 +6,7 @@
 #include "../include/http_proxy_util.h"
 #include "../include/socket_util.h"
 
+#define BASE_10 10
 #define PORT_LEN 6
 
 void usage(const char *program) {
@@ -28,20 +29,33 @@ int main(int argc, char *argv[]) {
   socklen_t cliaddr_len;
   int listenfd, connfd;
   char port[PORT_LEN], ipstr[INET6_ADDRSTRLEN];
+  char *invalid_digits;
   struct sigaction sa;
   pid_t pid;
-  int cache_timeout;
+  long cache_timeout;
 
   cache_timeout = 60;
   if (argc < 2) {
     fprintf(stderr, "[ERROR] not enough arguments supplied\n");
     usage(argv[0]);
+
     exit(EXIT_FAILURE);
   } else if (argc > 2) {
-    cache_timeout = atoi(argv[2]);
-  } else if (!is_valid_port(argv[1])) {
+    if ((cache_timeout = strtol(argv[2], &invalid_digits, BASE_10)) == 0) {
+      if (invalid_digits) {
+        fprintf(stderr, "[ERROR] invalid timeout specified\n");
+        usage(argv[0]);
+        
+        exit(EXIT_FAILURE);
+      }
+    }
+
+  }
+
+  if (!is_valid_port(argv[1])) {
     fprintf(stderr, "[ERROR] invalid port specified\n");
     usage(argv[0]);
+
     exit(EXIT_FAILURE);
   }
 
@@ -65,6 +79,7 @@ int main(int argc, char *argv[]) {
   }
 
   fprintf(stderr, "[INFO] listening on 0.0.0.0:%s\n", port);
+  fprintf(stderr, "[INFO] setting timeout to %ld\n", cache_timeout);
 
   cliaddr_len = sizeof(cliaddr);
 
