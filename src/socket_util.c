@@ -97,6 +97,7 @@ int listen_sockfd(const char *port) {
 
   if (srv_entry == NULL) {
     fprintf(stderr, "[ERROR] could not bind to any address\n");
+    freeaddrinfo(srv_entries);
     return -1;
   }
 
