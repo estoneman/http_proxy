@@ -8,6 +8,7 @@ int connection_sockfd(const char *hostname, const char *port) {
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
 
+  fprintf(stderr, "[INFO] connecting to %s:%s\n", hostname, port);
   if ((addrinfo_status = getaddrinfo(hostname, port, &hints, &srv_entries)) <
       0) {
     fprintf(stderr, "[ERROR] getaddrinfo: %s\n", gai_strerror(addrinfo_status));
@@ -35,7 +36,6 @@ int connection_sockfd(const char *hostname, const char *port) {
        (SO_ERROR  is one of the usual error codes listed here, explaining the
        reason for the failure).
      */
-    fprintf(stderr, "[INFO] connecting to %s:%s\n", hostname, port);
     if (connect(sockfd, srv_entry->ai_addr, srv_entry->ai_addrlen) < 0) {
       close(sockfd);
       continue;
