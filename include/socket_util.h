@@ -25,7 +25,7 @@
 #define MAX_RECV_SZ (RECV_CHUNK_SZ * 1000)
 #define RCVTIMEO_SEC 5
 #define RCVTIMEO_USEC (50 * 1000)
-#define RECV_CHUNK_SZ 1024
+#define RECV_CHUNK_SZ 4096
 
 int connection_sockfd(const char *, const char *);
 int listen_sockfd(const char *);
