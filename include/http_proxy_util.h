@@ -2,7 +2,6 @@
 #define HTTP_PROXY_UTIL_H_
 
 #include <math.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -27,6 +26,8 @@
 #define HTTP_PORT_MAX_DIGITS 5
 #define HTTP_QUERIES_MAX 32
 #define HTTP_REMOTE_MAX 1024
+#define HTTP_SCHEME_MAX 16
+#define HTTP_SCHEME "http://"
 #define HTTP_URI_MAX \
   (HTTP_HOSTNAME_MAX + HTTP_PORT_MAX_DIGITS + HTTP_REMOTE_MAX)
 #define HTTP_VERSION_MAX 16
@@ -36,7 +37,11 @@
 #define HTTP_METHOD_NOT_ALLOWED_CODE 405
 #define HTTP_VERSION_NOT_SUPPORTED_CODE 505
 
+#define MAX_URLS 128
+#define MAX_URL_SZ 4096
+
 typedef struct {
+  char scheme[HTTP_SCHEME_MAX];
   char hostname[HTTP_HOSTNAME_MAX];
   char port[HTTP_PORT_MAX_DIGITS];
   char remote_uri[HTTP_REMOTE_MAX];
@@ -63,29 +68,11 @@ typedef struct {
   char value[HTTP_HEADER_VALUE_MAX];
 } HTTPHeader;
 
-typedef struct {
-  int sockfd;
-  char *data;
-  ssize_t len_data;
-} SocketBuffer;
-
-typedef struct {
-  char fpath[HTTP_FNAME_MAX];
-  char uri[HTTP_URI_MAX];
-  char *data;
-  ssize_t len_data;
-} ProxyCache;
-
 char *alloc_buf(size_t);
-void *async_cache_get(void *);
-void *async_cache_response(void *);
-void *async_prefetch_response(void *);
-void *async_proxy_send(void *);
-void *async_proxy_recv(void *);
-void *async_read_cache(void *);
 char *build_request(HTTPCommand *, HTTPHeader **, size_t, size_t *);
 int chk_alloc_err(void *, const char *, const char *, int);
 ssize_t find_crlf(char *, size_t);
+char **get_urls(char *, size_t, size_t *);
 void handle_connection(int, int);
 unsigned long hash_djb2(char *);
 ssize_t http_readline(char *, size_t, char *);
@@ -96,8 +83,6 @@ ssize_t parse_host(char *, size_t, HTTPHost *);
 ssize_t parse_query(char *, HTTPQuery *);
 ssize_t parse_request(char *, ssize_t, HTTPCommand *, HTTPHeader *, size_t *);
 ssize_t parse_uri(char *, size_t, HTTPUri *);
-char *proxy_recv(int, ssize_t *);
-ssize_t proxy_send(int, char *, size_t);
 char *read_file(const char *, size_t *);
 ssize_t read_until(char *, size_t, char, char *, size_t);
 char *realloc_buf(char *, size_t size);
