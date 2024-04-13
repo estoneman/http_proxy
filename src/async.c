@@ -106,7 +106,8 @@ void *async_prefetch_response(void *arg) {
     strnins(pc_write[i].fpath, CACHE_BASE, sizeof(CACHE_BASE));
 
 #ifdef DEBUG
-    fprintf(stderr, "[%s] resolved %s to file %s\n", __func__, urls[i], pc_write[i].fpath);
+    fprintf(stderr, "[%s] resolved %s to file %s\n", __func__, urls[i],
+            pc_write[i].fpath);
     fflush(stderr);
 #endif
 

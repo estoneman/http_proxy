@@ -119,7 +119,8 @@ char **get_urls(char *html, size_t len_html, size_t *n_urls) {
     if (hash_djb2(tmp_buf) == scheme_hash) {
       while (html_ptr < len_html &&
              (html[html_ptr] != '"' && html[html_ptr] != ' ' &&
-              html[html_ptr] != '\'' && html[html_ptr] != ')' && html[html_ptr] != '\n')) {
+              html[html_ptr] != '\'' && html[html_ptr] != ')' &&
+              html[html_ptr] != '\n')) {
         urls[*n_urls][url_ptr] = html[html_ptr];
 
         url_ptr++;
