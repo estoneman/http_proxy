@@ -24,10 +24,8 @@ typedef struct {
 
 void *async_cache_response(void *);
 void *async_prefetch_response(void *);
-void *async_proxy_send(void *);
 void *async_proxy_recv(void *);
+void *async_proxy_send(void *);
 void *async_read_cache(void *arg);
-char *proxy_recv(int, ssize_t *);
-ssize_t proxy_send(int, char *, size_t);
 
 #endif  // ASYNC_H_
