@@ -2,11 +2,8 @@
 
 #include "../include/http_proxy_util.h"
 
+#include "../include/async.h"
 #include "../include/socket_util.h"
-
-/* thread access management */
-static pthread_rwlock_t shared_data_rwlock = PTHREAD_RWLOCK_INITIALIZER;  // socket and file
-static pthread_mutex_t io_mutex = PTHREAD_MUTEX_INITIALIZER;  // data buffers
 
 char *alloc_buf(size_t size) {
   char *buf;
@@ -17,125 +14,6 @@ char *alloc_buf(size_t size) {
   }
 
   return buf;
-}
-
-void *async_cache_response(void *data) {
-  ProxyCache *proxy_cache = (ProxyCache *)data;
-
-  FILE *cache_fp;
-  size_t bytes_written;
-
-  pthread_mutex_lock(&io_mutex);
-  if ((cache_fp = fopen(proxy_cache->fpath, "wb")) == NULL) {
-    fprintf(stderr, "[ERROR] unable to open file: %s\n", proxy_cache->fpath);
-    fprintf(stderr, "  REASON: %s\n", strerror(errno));
-
-    return NULL;
-  }
-
-  pthread_rwlock_rdlock(&shared_data_rwlock);
-  fprintf(stderr, "[%s] caching %s\n", __func__, proxy_cache->fpath);
-  if ((bytes_written = fwrite(proxy_cache->data, sizeof(char),
-                              proxy_cache->len_data, cache_fp)) !=
-      (size_t)proxy_cache->len_data) {
-    fprintf(stderr, "[ERROR] incomplete write of file '%s'\n",
-            proxy_cache->fpath);
-
-    fclose(cache_fp);
-    return NULL;
-  }
-  pthread_rwlock_unlock(&shared_data_rwlock);
-
-  fclose(cache_fp);
-  pthread_mutex_unlock(&io_mutex);
-
-  return NULL;
-}
-
-void *async_prefetch_response(void *arg) {
-  SocketBuffer *socket_buf = (SocketBuffer *)arg;
-
-  pthread_mutex_lock(&io_mutex);
-
-  fprintf(stderr, "[%s] i have access to all %zu bytes\n", __func__, socket_buf->len_data);
-  // sum of sizes of all a_tags will always be less than socket_buf->len_data
-  // could create a single character buffer that is delimited by newlines
-  // then loop through each entry and do a async_proxy_recv, async_proxy_send,
-  // and finally a async_cache_response
-  //
-  // pseudocode
-  // http_links = get_http_links()
-  // for http_link in http_links:
-  //   http_link.uri = parse_uri(http_link)
-  //   sockfd = connection_sockfd(origin_sever)
-  //   request = "GET http_link.uri HTTP/1.1\r\n\r\n"
-  //   async_proxy_send(sockfd, request)
-  //   response = async_proxy_recv(sockfd)
-  //   sockfd = client_sockfd
-  //   async_proxy_send(sockfd, response)
-  //
-  //   if query_params not in http_link.uri:
-  //     async_cache_response(response)
-  pthread_mutex_unlock(&io_mutex);
-
-  return NULL;
-}
-
-void *async_proxy_recv(void *arg) {
-  SocketBuffer *socket_buf = (SocketBuffer *)arg;
-
-  pthread_mutex_lock(&io_mutex);
-  pthread_rwlock_wrlock(&shared_data_rwlock);
-
-  socket_buf->data = proxy_recv(socket_buf->sockfd, &(socket_buf->len_data));
-
-#ifdef DEBUG
-  fprintf(stderr, "[%s] received %zd bytes\n", __func__, socket_buf->len_data);
-  fflush(stderr);
-#endif
-
-  pthread_rwlock_unlock(&shared_data_rwlock);
-  pthread_mutex_unlock(&io_mutex);
-
-  return NULL;
-}
-
-void *async_proxy_send(void *arg) {
-  SocketBuffer *socket_buf = (SocketBuffer *)arg;
-  ssize_t bytes_sent;
-
-  pthread_mutex_lock(&io_mutex);
-  pthread_rwlock_rdlock(&shared_data_rwlock);
-
-  if ((bytes_sent = proxy_send(socket_buf->sockfd, socket_buf->data,
-                               socket_buf->len_data)) != socket_buf->len_data) {
-    fprintf(stderr, "[ERROR] incomplete send\n");
-  }
-
-#ifdef DEBUG
-  fprintf(stderr, "[%s] sent %zd bytes\n", __func__, bytes_sent);
-  fflush(stderr);
-#endif
-
-  pthread_rwlock_unlock(&shared_data_rwlock);
-  pthread_mutex_unlock(&io_mutex);
-
-  return NULL;
-}
-
-void *async_read_cache(void *arg) {
-  ProxyCache *pc_read = (ProxyCache *)arg;
-
-  pthread_mutex_lock(&io_mutex);
-  pthread_rwlock_wrlock(&shared_data_rwlock);
-
-  pc_read->data = read_file(pc_read->fpath, (size_t *)&(pc_read->len_data));
-  fprintf(stderr, "[%s] read %zu bytes from %s\n", __func__, pc_read->len_data, pc_read->fpath);
-
-  pthread_rwlock_unlock(&shared_data_rwlock);
-  pthread_mutex_unlock(&io_mutex);
-
-  return NULL;
 }
 
 /*
@@ -212,9 +90,56 @@ ssize_t find_crlf(char *buf, size_t len_buf) {
   return -1;
 }
 
+char **get_urls(char *html, size_t len_html, size_t *n_urls) {
+  char **urls, tmp_buf[HTTP_SCHEME_MAX];
+  size_t html_ptr, url_ptr;
+  unsigned long scheme_hash;
+
+  if ((urls = (char **)malloc(MAX_URLS * sizeof(char *))) == NULL) {
+    fprintf(stderr, "[FATAL] out of memory\n");
+
+    exit(EXIT_FAILURE);
+  }
+
+  for (size_t i = 0; i < MAX_URLS; ++i) {
+    if ((urls[i] = alloc_buf(MAX_URL_SZ + 1)) == NULL) {
+      fprintf(stderr, "[FATAL] out of memory\n");
+
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  scheme_hash = hash_djb2(HTTP_SCHEME);
+  html_ptr = 0;
+  *n_urls = 0;
+
+  while (html_ptr < len_html - strlen(HTTP_SCHEME) - 1) {
+    url_ptr = 0;
+    strncpy(tmp_buf, html + html_ptr, strlen(HTTP_SCHEME));
+    if (hash_djb2(tmp_buf) == scheme_hash) {
+      while (html_ptr < len_html &&
+             (html[html_ptr] != '"' && html[html_ptr] != ' ' &&
+              html[html_ptr] != '\'' && html[html_ptr] != ')' && html[html_ptr] != '\n')) {
+        urls[*n_urls][url_ptr] = html[html_ptr];
+
+        url_ptr++;
+        html_ptr++;
+      }
+      urls[*n_urls][url_ptr] = '\0';
+      *n_urls = *n_urls + 1;
+
+      continue;
+    }
+
+    html_ptr++;
+  }
+
+  return urls;
+}
+
 void handle_connection(int client_sockfd, int cache_timeout) {
   pthread_t tid_recv, tid_forward_request, tid_forward_response,
-      tid_cache_response, tid_read_cache;  // , tid_prefetch_response;
+      tid_cache_response, tid_read_cache, tid_prefetch_response;
 
   SocketBuffer sb_send;
   SocketBuffer sb_recv;
@@ -232,9 +157,9 @@ void handle_connection(int client_sockfd, int cache_timeout) {
   struct stat st_cache;
   struct timespec ts_current;
   long int diff;
+  pid_t chld_pid;
 
-  fprintf(stderr, "[%s] socket %d: new connection\n", __func__, client_sockfd);
-
+  chld_pid = getpid();
   // recv from client
   sb_recv.sockfd = client_sockfd;
   if (pthread_create(&tid_recv, NULL, async_proxy_recv, &sb_recv) < 0) {
@@ -269,6 +194,12 @@ void handle_connection(int client_sockfd, int cache_timeout) {
 
   snprintf(pc_read.fpath, HASH_LEN, "%0*lx", HASH_LEN - 1, hash);
   strnins(pc_read.fpath, CACHE_BASE, sizeof(CACHE_BASE));
+
+#ifdef DEBUG
+  fprintf(stderr, "[%s:%d] resolved fpath of %s = %s\n", __func__, chld_pid,
+          uri, pc_read.fpath);
+  fflush(stderr);
+#endif
 
   diff = -1;
   if ((access = stat(pc_read.fpath, &st_cache)) == 0) {
@@ -320,12 +251,24 @@ void handle_connection(int client_sockfd, int cache_timeout) {
               __LINE__ - 1);
       exit(EXIT_FAILURE);
     }
+
     free_recv_buf = 1;
+
     pthread_join(tid_recv, NULL);
 
     // free old sb_send.data
     free(sb_send.data);
-    
+    // don't need anymore
+    close(origin_sockfd);
+
+    // prefetch response
+    if (pthread_create(&tid_prefetch_response, NULL, async_prefetch_response,
+                       &sb_recv) < 0) {
+      fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+              __LINE__ - 1);
+      exit(EXIT_FAILURE);
+    }
+
     // allocate space for socket send buffer
     if ((sb_send.data = alloc_buf(sb_recv.len_data)) == NULL) {
       fprintf(stderr, "[FATAL] out of memory\n");
@@ -376,7 +319,7 @@ void handle_connection(int client_sockfd, int cache_timeout) {
 
       exit(EXIT_FAILURE);
     }
-    
+
     // copy read bytes from cache to cache write buffer (refreshes cache entry)
     memcpy(pc_write.data, pc_read.data, pc_read.len_data);
     pc_write.len_data = pc_read.len_data;
@@ -405,18 +348,10 @@ void handle_connection(int client_sockfd, int cache_timeout) {
     }
   }
 
-  // prefetch response
-  // if (pthread_create(&tid_prefetch_response, NULL, async_prefetch_response,
-  //                    &sb_send) < 0) {
-  //   fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
-  //           __LINE__ - 1);
-  //   exit(EXIT_FAILURE);
-  // }
-
   pthread_join(tid_forward_request, NULL);
   pthread_join(tid_forward_response, NULL);
   pthread_join(tid_cache_response, NULL);
-  // pthread_join(tid_prefetch_response, NULL);
+  pthread_join(tid_prefetch_response, NULL);
 
   free(http_hdrs);
   if (free_recv_buf == 1) {  // may not have recieved from origin if we went
@@ -429,7 +364,10 @@ void handle_connection(int client_sockfd, int cache_timeout) {
   free(pc_write.data);
   free(pc_read.data);
 
-  fprintf(stderr, "[%s] socket %d: connection closed\n", __func__, client_sockfd);
+#ifdef DEBUG
+  fprintf(stderr, "[%s:%d] socket %d: connection closed\n", __func__, chld_pid,
+          client_sockfd);
+#endif
 }
 
 unsigned long hash_djb2(char *s) {
@@ -641,20 +579,11 @@ ssize_t parse_request(char *client_buf, ssize_t nb_recv, HTTPCommand *http_cmd,
   }
 
   // more data in headers, so validate command first (could return early)
-  // TODO: not sure if i need to return an offset from `parse_headers`
   if ((tmp_buf_offset += parse_headers(
            client_buf + buf_offset, nb_recv - buf_offset, http_hdrs, n_hdrs)) ==
       -1) {
     return HTTP_BAD_REQUEST_CODE;
   }
-
-  // TODO: why would we need to validate headers?
-  // if ((http_status = validate_headers(http_hdrs, n_hdrs)) > 0) {
-  //   fprintf(stderr, "[ERROR] invalid headers: %d %s\n", http_status,
-  //           http_status_msg(http_status));
-  //
-  //   return http_status;
-  // }
 
   return 0;
 }
@@ -665,72 +594,18 @@ ssize_t parse_request(char *client_buf, ssize_t nb_recv, HTTPCommand *http_cmd,
       HTTPQuery *query;
     } HTTPUri;
  */
-// TODO: error when using https instead of http as scheme
 ssize_t parse_uri(char *buf, size_t len_buf, HTTPUri *http_uri) {
   ssize_t skip;
+  size_t scheme_end;
 
-  buf += skip_scheme(buf);
+  scheme_end = 0;
+  scheme_end +=
+      read_until(buf, len_buf, '/', http_uri->host.scheme, HTTP_SCHEME_MAX) + 2;
 
-  skip = parse_host(buf, len_buf, &(http_uri->host));
+  skip = parse_host(buf + scheme_end, len_buf, &(http_uri->host));
   skip += parse_query(buf + skip, http_uri->query);
 
   return skip;
-}
-
-char *proxy_recv(int sockfd, ssize_t *nb_recv) {
-  char *recv_buf;
-  size_t total_nb_recv, num_reallocs, bytes_alloced, realloc_sz;
-
-  if ((recv_buf = alloc_buf(RECV_CHUNK_SZ)) == NULL) {
-    fprintf(stderr, "failed to allocate receive buffer (%s:%d)", __func__,
-            __LINE__ - 1);
-    return NULL;
-  }
-
-  bytes_alloced = RECV_CHUNK_SZ;
-
-  set_timeout(sockfd, 0, RCVTIMEO_USEC);
-
-  total_nb_recv = realloc_sz = num_reallocs = 0;
-  while ((*nb_recv = recv(sockfd, recv_buf + total_nb_recv, RECV_CHUNK_SZ, 0)) >
-         0) {
-      total_nb_recv += *nb_recv;
-
-      if (total_nb_recv + RECV_CHUNK_SZ >= bytes_alloced) {
-        realloc_sz = bytes_alloced * 2;
-        if ((recv_buf = realloc_buf(recv_buf, realloc_sz)) == NULL) {
-          fprintf(stderr, "[FATAL] out of memory: attempted realloc size = %zu\n", realloc_sz);
-          free(recv_buf);  // free old buffer
-
-          exit(EXIT_FAILURE);
-        }
-      }
-
-      bytes_alloced = realloc_sz;
-      num_reallocs++;
-  }
-
-  *nb_recv = total_nb_recv;
-
-  if (total_nb_recv == 0) {  // timeout
-    perror("recv");
-    free(recv_buf);
-
-    return NULL;
-  }
-
-  return recv_buf;
-}
-
-ssize_t proxy_send(int sockfd, char *send_buf, size_t len_send_buf) {
-  ssize_t nb_sent;
-
-  if ((nb_sent = send(sockfd, send_buf, len_send_buf, 0)) < 0) {
-    perror("send");
-    return -1;
-  }
-
-  return nb_sent;
 }
 
 char *read_file(const char *fpath, size_t *nb_read) {
@@ -810,11 +685,14 @@ void rebuild_uri(char *uri, HTTPCommand *http_cmd, int include_host) {
 
   if (include_host) {
     len_uri += snprintf(uri,
-                        sizeof(http_cmd->uri.host.hostname) +
+                        sizeof(http_cmd->uri.host.scheme) +
+                            sizeof(http_cmd->uri.host.hostname) +
                             sizeof(http_cmd->uri.host.port) +
-                            sizeof(http_cmd->uri.host.remote_uri) + 1,
-                        "%s:%s%s", http_cmd->uri.host.hostname,
-                        http_cmd->uri.host.port, http_cmd->uri.host.remote_uri);
+                            sizeof(http_cmd->uri.host.remote_uri),
+                        "%s%s:%s%s", http_cmd->uri.host.scheme,
+                        http_cmd->uri.host.hostname, http_cmd->uri.host.port,
+                        http_cmd->uri.host.remote_uri) +
+               1;
   } else {
     len_uri += snprintf(uri, sizeof(http_cmd->uri.host.remote_uri), "%s",
                         http_cmd->uri.host.remote_uri);
@@ -830,8 +708,8 @@ void rebuild_uri(char *uri, HTTPCommand *http_cmd, int include_host) {
 
     len_uri += snprintf(uri + len_uri, HTTP_PARAM_KEY_MAX + 1,
                         "%s=", http_cmd->uri.query[i].key);
-    len_uri += snprintf(uri + len_uri, HTTP_PARAM_VALUE_MAX,
-                        "%s", http_cmd->uri.query[i].value);
+    len_uri += snprintf(uri + len_uri, HTTP_PARAM_VALUE_MAX, "%s",
+                        http_cmd->uri.query[i].value);
   }
 }
 
@@ -855,9 +733,7 @@ int send_err(int sockfd, size_t http_status_code) {
   }
 
   if ((file_contents = read_file(err_file, &nb_read)) == NULL) {
-#ifdef DEBUG
-    fprintf(stderr, "[INFO] unable to read file %s\n", err_file);
-#endif
+    fprintf(stderr, "[ERROR] unable to read file %s\n", err_file);
     return -1;
   }
 
@@ -902,15 +778,14 @@ int send_err(int sockfd, size_t http_status_code) {
 }
 
 size_t skip_scheme(char *buf) {
-  size_t i, len_buf;
+  size_t i;
 
   i = 0;
-  len_buf = strlen(buf);
-  while (i < len_buf && buf[i] != '/') {
+  while (i < HTTP_SCHEME_MAX && buf[i] != '/') {
     i++;
   }
 
-  return i == len_buf ? 0 : i + 2;  // move past second '/'
+  return i == HTTP_SCHEME_MAX - 1 ? 0 : i + 2;  // move past second '/'
 }
 
 size_t strnins(char *dst, const char *src, size_t n) {
@@ -942,6 +817,7 @@ void print_command(HTTPCommand http_cmd) {
   fprintf(stderr, "  Method: %s\n", http_cmd.method);
   fprintf(stderr, "  HTTPUri {\n");
   fprintf(stderr, "    HTTPHost {\n");
+  fprintf(stderr, "      scheme: %s\n", http_cmd.uri.host.scheme);
   fprintf(stderr, "      hostname: %s\n", http_cmd.uri.host.hostname);
   fprintf(stderr, "      port: %s\n", http_cmd.uri.host.port);
   fprintf(stderr, "      remote_uri: %s\n", http_cmd.uri.host.remote_uri);
