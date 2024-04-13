@@ -8,10 +8,13 @@ int connection_sockfd(const char *hostname, const char *port) {
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
 
-  fprintf(stderr, "[INFO] connecting to %s:%s\n", hostname, port);
+#ifdef DEBUG
+  fprintf(stderr, "[%s] connecting to %s:%s\n", __func__, hostname, port);
+#endif
   if ((addrinfo_status = getaddrinfo(hostname, port, &hints, &srv_entries)) <
       0) {
     fprintf(stderr, "[ERROR] getaddrinfo: %s\n", gai_strerror(addrinfo_status));
+
     return -1;
   }
 
@@ -98,6 +101,7 @@ int listen_sockfd(const char *port) {
   if (srv_entry == NULL) {
     fprintf(stderr, "[ERROR] could not bind to any address\n");
     freeaddrinfo(srv_entries);
+
     return -1;
   }
 
@@ -121,6 +125,63 @@ void get_ipstr(char *ipstr, struct sockaddr *addr) {
 int is_valid_port(const char *arg) {
   int port = atoi(arg);
   return (port >= 1024 && port <= 65535);
+}
+
+char *proxy_recv(int sockfd, ssize_t *nb_recv) {
+  char *recv_buf;
+  size_t total_nb_recv, num_reallocs, bytes_alloced, realloc_sz;
+
+  if ((recv_buf = alloc_buf(RECV_CHUNK_SZ)) == NULL) {
+    fprintf(stderr, "failed to allocate receive buffer (%s:%d)", __func__,
+            __LINE__ - 1);
+    return NULL;
+  }
+
+  bytes_alloced = RECV_CHUNK_SZ;
+
+  set_timeout(sockfd, RCVTIMEO_SEC, RCVTIMEO_USEC);
+
+  total_nb_recv = realloc_sz = num_reallocs = 0;
+  while ((*nb_recv = recv(sockfd, recv_buf + total_nb_recv, RECV_CHUNK_SZ, 0)) >
+         0) {
+    total_nb_recv += *nb_recv;
+
+    if (total_nb_recv + RECV_CHUNK_SZ >= bytes_alloced) {
+      realloc_sz = bytes_alloced * 2;
+      if ((recv_buf = realloc_buf(recv_buf, realloc_sz)) == NULL) {
+        fprintf(stderr, "[FATAL] out of memory: attempted realloc size = %zu\n",
+                realloc_sz);
+        free(recv_buf);  // free old buffer
+
+        exit(EXIT_FAILURE);
+      }
+    }
+
+    bytes_alloced = realloc_sz;
+    num_reallocs++;
+  }
+
+  *nb_recv = total_nb_recv;
+
+  if (total_nb_recv == 0) {  // timeout
+    perror("recv");
+    free(recv_buf);
+
+    return NULL;
+  }
+
+  return recv_buf;
+}
+
+ssize_t proxy_send(int sockfd, char *send_buf, size_t len_send_buf) {
+  ssize_t nb_sent;
+
+  if ((nb_sent = send(sockfd, send_buf, len_send_buf, 0)) < 0) {
+    perror("send");
+    return -1;
+  }
+
+  return nb_sent;
 }
 
 void set_timeout(int sockfd, long tv_sec, long tv_usec) {
