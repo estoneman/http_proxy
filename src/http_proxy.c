@@ -45,11 +45,10 @@ int main(int argc, char *argv[]) {
       if (invalid_digits) {
         fprintf(stderr, "[ERROR] invalid timeout specified\n");
         usage(argv[0]);
-        
+
         exit(EXIT_FAILURE);
       }
     }
-
   }
 
   if (!is_valid_port(argv[1])) {
@@ -78,8 +77,8 @@ int main(int argc, char *argv[]) {
     exit(EXIT_FAILURE);
   }
 
-  fprintf(stderr, "[INFO] listening on 0.0.0.0:%s\n", port);
-  fprintf(stderr, "[INFO] setting timeout to %ld\n", cache_timeout);
+  fprintf(stderr, "[%s] proxy listening on 0.0.0.0:%s, timeout = %ld\n",
+          __func__, port, cache_timeout);
 
   cliaddr_len = sizeof(cliaddr);
 
@@ -91,8 +90,8 @@ int main(int argc, char *argv[]) {
     }
 
     get_ipstr(ipstr, (struct sockaddr *)&cliaddr);
-    fprintf(stderr, "[INFO] socket %d: new connection (%s:%d)\n", connfd, ipstr,
-            ntohs(cliaddr.sin_port));
+    fprintf(stderr, "[%s] socket %d: new connection (%s:%d)\n", __func__,
+            connfd, ipstr, ntohs(cliaddr.sin_port));
 
     if ((pid = fork()) < 0) {
       fprintf(stderr, "[ERROR] could not create child process: %s\n",
