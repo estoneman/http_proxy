@@ -139,8 +139,6 @@ char *proxy_recv(int sockfd, ssize_t *nb_recv) {
 
   bytes_alloced = RECV_CHUNK_SZ;
 
-  set_timeout(sockfd, RCVTIMEO_SEC, RCVTIMEO_USEC);
-
   total_nb_recv = realloc_sz = num_reallocs = 0;
   while ((*nb_recv = recv(sockfd, recv_buf + total_nb_recv, RECV_CHUNK_SZ, 0)) >
          0) {
