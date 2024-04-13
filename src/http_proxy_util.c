@@ -163,6 +163,8 @@ void handle_connection(int client_sockfd, int cache_timeout) {
   chld_pid = getpid();
   // recv from client
   sb_recv.sockfd = client_sockfd;
+  set_timeout(client_sockfd, RCVTIMEO_SEC, RCVTIMEO_USEC);
+
   if (pthread_create(&tid_recv, NULL, async_proxy_recv, &sb_recv) < 0) {
     fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
             __LINE__ - 1);
@@ -247,6 +249,10 @@ void handle_connection(int client_sockfd, int cache_timeout) {
 
     // recv from origin server
     sb_recv.sockfd = origin_sockfd;
+    // TODO: should set this differently than fine-grained timeout
+    //       *not necessary to fulfill MVP*
+    set_timeout(client_sockfd, RCVTIMEO_SEC, RCVTIMEO_USEC);
+
     if (pthread_create(&tid_recv, NULL, async_proxy_recv, &sb_recv) < 0) {
       fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
               __LINE__ - 1);
@@ -568,14 +574,14 @@ ssize_t parse_query(char *buf, HTTPQuery *http_query) {
 
 ssize_t parse_request(char *client_buf, ssize_t nb_recv, HTTPCommand *http_cmd,
                       HTTPHeader *http_hdrs, size_t *n_hdrs) {
-  int buf_offset, tmp_buf_offset, http_status;
+  int buf_offset, tmp_buf_offset;
 
   if ((tmp_buf_offset = parse_command(client_buf, nb_recv, http_cmd)) == -1) {
     return HTTP_BAD_REQUEST_CODE;
   }
   buf_offset = tmp_buf_offset;
 
-  if ((http_status = validate_method(http_cmd->method)) != 0) {
+  if (!validate_method(http_cmd->method)) {
     return HTTP_BAD_REQUEST_CODE;
   }
 
@@ -601,7 +607,9 @@ ssize_t parse_uri(char *buf, size_t len_buf, HTTPUri *http_uri) {
 
   scheme_end = 0;
   scheme_end +=
-      read_until(buf, len_buf, '/', http_uri->host.scheme, HTTP_SCHEME_MAX) + 2;
+      read_until(buf, len_buf, ':', http_uri->host.scheme, HTTP_SCHEME_MAX);
+  strncat(http_uri->host.scheme, buf + scheme_end - 1, sizeof("://") - 1);
+  scheme_end += 2;
 
   skip = parse_host(buf + scheme_end, len_buf, &(http_uri->host));
   skip += parse_query(buf + skip, http_uri->query);
@@ -808,7 +816,12 @@ size_t strnins(char *dst, const char *src, size_t n) {
 }
 
 int validate_method(char *method) {
-  return strncmp(method, "GET", strlen("GET"));
+  unsigned long method_hash, valid_hash;
+
+  valid_hash = hash_djb2("GET");
+  method_hash = hash_djb2(method);
+
+  return valid_hash == method_hash;
 }
 
 // === DEBUG FUNCTIONS ===
