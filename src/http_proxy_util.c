@@ -95,6 +95,10 @@ char **get_urls(char *html, size_t len_html, size_t *n_urls) {
   size_t html_ptr, url_ptr;
   unsigned long scheme_hash;
 
+  if (len_html == 0) {
+    return NULL;
+  }
+
   if ((urls = (char **)malloc(MAX_URLS * sizeof(char *))) == NULL) {
     fprintf(stderr, "[FATAL] out of memory\n");
 
@@ -118,15 +122,20 @@ char **get_urls(char *html, size_t len_html, size_t *n_urls) {
     strncpy(tmp_buf, html + html_ptr, strlen(HTTP_SCHEME));
     if (hash_djb2(tmp_buf) == scheme_hash) {
       while (html_ptr < len_html &&
-             (html[html_ptr] != '"' && html[html_ptr] != ' ' &&
-              html[html_ptr] != '\'' && html[html_ptr] != ')' &&
-              html[html_ptr] != '\n')) {
+             (html[html_ptr] != '"' && html[html_ptr] != '\'' &&
+              !isspace(html[html_ptr]) && html[html_ptr] != ')')) {
         urls[*n_urls][url_ptr] = html[html_ptr];
 
         url_ptr++;
         html_ptr++;
       }
       urls[*n_urls][url_ptr] = '\0';
+
+#ifdef DEBUG
+      fprintf(stderr, "[%s] found url: %s\n", __func__, urls[*n_urls]);
+      fflush(stderr);
+#endif
+
       *n_urls = *n_urls + 1;
 
       continue;
@@ -154,17 +163,16 @@ void handle_connection(int client_sockfd, int cache_timeout) {
   ProxyCache pc_write;
   char uri[HTTP_URI_MAX];
   unsigned long hash;
-  int access;
+  int access, http_status;
   struct stat st_cache;
   struct timespec ts_current;
   long int diff;
   pid_t chld_pid;
 
   chld_pid = getpid();
+
   // recv from client
   sb_recv.sockfd = client_sockfd;
-  set_timeout(client_sockfd, RCVTIMEO_SEC, RCVTIMEO_USEC);
-
   if (pthread_create(&tid_recv, NULL, async_proxy_recv, &sb_recv) < 0) {
     fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
             __LINE__ - 1);
@@ -175,6 +183,10 @@ void handle_connection(int client_sockfd, int cache_timeout) {
   if (sb_recv.data == NULL) {
     exit(EXIT_FAILURE);
   }
+#ifdef DEBUG
+  fprintf(stderr, "[%s:%d] received %zu bytes\n", __func__, chld_pid,
+          sb_recv.len_data);
+#endif
 
   http_hdrs = malloc(HTTP_HEADERS_MAX * sizeof(HTTPHeader));
   chk_alloc_err(http_hdrs, "malloc", __func__, __LINE__ - 1);
@@ -195,7 +207,7 @@ void handle_connection(int client_sockfd, int cache_timeout) {
   rebuild_uri(uri, &http_cmd, 1);
   hash = hash_djb2(uri);
 
-  snprintf(pc_read.fpath, HASH_LEN, "%0*lx", HASH_LEN - 1, hash);
+  snprintf(pc_read.fpath, HASH_LEN, "%lx",  hash);
   strnins(pc_read.fpath, CACHE_BASE, sizeof(CACHE_BASE));
 
 #ifdef DEBUG
@@ -216,16 +228,24 @@ void handle_connection(int client_sockfd, int cache_timeout) {
 
   if (access == -1 ||
       diff > cache_timeout) {  // non-existent or stale cache entry
+#ifdef DEBUG
+    fprintf(stderr, "[%s] refreshing cache entry for %s\n", __func__, uri);
+    fflush(stderr);
+#endif
     // delete stale entry
     if (access == 0) {
+#ifdef DEBUG
+    fprintf(stderr, "[%s] removing stale cache entry %s\n", __func__, uri);
+    fflush(stderr);
+#endif
       unlink(pc_read.fpath);
     }
 
     // connect to origin server
-    if ((origin_sockfd = connection_sockfd(http_cmd.uri.host.hostname,
-                                           http_cmd.uri.host.port)) == -1) {
+    if ((http_status = connection_sockfd(http_cmd.uri.host.hostname,
+                                           http_cmd.uri.host.port)) > HTTP_BAD_REQUEST_CODE) {
       // could not create socket to connect to origin server
-      if (send_err(client_sockfd, HTTP_NOT_FOUND_CODE) < 0) {
+      if (send_err(client_sockfd, http_status) < 0) {
         free(http_hdrs);
         exit(EXIT_FAILURE);  // server error
       }
@@ -234,6 +254,8 @@ void handle_connection(int client_sockfd, int cache_timeout) {
 
       return;
     }
+
+    origin_sockfd = http_status;
 
     sb_send.sockfd = origin_sockfd;
     sb_send.data = build_request(&http_cmd, &http_hdrs, n_hdrs, &len_request);
@@ -251,7 +273,6 @@ void handle_connection(int client_sockfd, int cache_timeout) {
     sb_recv.sockfd = origin_sockfd;
     // TODO: should set this differently than fine-grained timeout
     //       *not necessary to fulfill MVP*
-    set_timeout(client_sockfd, RCVTIMEO_SEC, RCVTIMEO_USEC);
 
     if (pthread_create(&tid_recv, NULL, async_proxy_recv, &sb_recv) < 0) {
       fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
@@ -260,7 +281,6 @@ void handle_connection(int client_sockfd, int cache_timeout) {
     }
 
     free_recv_buf = 1;
-
     pthread_join(tid_recv, NULL);
 
     // free old sb_send.data
@@ -380,7 +400,7 @@ void handle_connection(int client_sockfd, int cache_timeout) {
 #endif
 }
 
-unsigned long hash_djb2(char *s) {
+unsigned long hash_djb2(const char *s) {
   unsigned long hash = 5381;
   int c;
 
@@ -408,6 +428,8 @@ const char *http_status_msg(int http_status_code) {
   switch (http_status_code) {
     case HTTP_BAD_REQUEST_CODE:
       return "Bad Request";
+    case HTTP_FORBIDDEN_CODE:
+      return "Forbidden";
     case HTTP_NOT_FOUND_CODE:
       return "Not Found";
     default:
@@ -443,6 +465,10 @@ ssize_t parse_command(char *client_buf, size_t nb_recv, HTTPCommand *http_cmd) {
     return -1;
   }
   buf_offset = tmp_buf_offset;
+
+  if (!validate_method(http_cmd->method)) {
+    return -1;
+  }
 
   if ((tmp_buf_offset = read_until(line + buf_offset, line_len - buf_offset,
                                    ' ', uri, sizeof(uri))) == -1) {
@@ -584,10 +610,6 @@ ssize_t parse_request(char *client_buf, ssize_t nb_recv, HTTPCommand *http_cmd,
   }
   buf_offset = tmp_buf_offset;
 
-  if (!validate_method(http_cmd->method)) {
-    return HTTP_BAD_REQUEST_CODE;
-  }
-
   // more data in headers, so validate command first (could return early)
   if ((tmp_buf_offset += parse_headers(
            client_buf + buf_offset, nb_recv - buf_offset, http_hdrs, n_hdrs)) ==
@@ -611,7 +633,8 @@ ssize_t parse_uri(char *buf, size_t len_buf, HTTPUri *http_uri) {
   scheme_end = 0;
   scheme_end +=
       read_until(buf, len_buf, ':', http_uri->host.scheme, HTTP_SCHEME_MAX);
-  strncat(http_uri->host.scheme, buf + scheme_end - 1, sizeof("://") - 1);
+
+  strncat(http_uri->host.scheme, buf + scheme_end - 1, strlen("://"));
   scheme_end += 2;
 
   skip = parse_host(buf + scheme_end, len_buf, &(http_uri->host));
@@ -736,11 +759,14 @@ int send_err(int sockfd, size_t http_status_code) {
     case HTTP_BAD_REQUEST_CODE:
       err_file = HTML_400;
       break;
+    case HTTP_FORBIDDEN_CODE:
+      err_file = HTML_403;
+      break;
     case HTTP_NOT_FOUND_CODE:
       err_file = HTML_404;
       break;
     default:
-      fprintf(stderr, "[FATAL] this code should be unreachable\n");
+      fprintf(stderr, "[FATAL] (%s:%d) this code should be unreachable\n", __func__, __LINE__);
       exit(EXIT_FAILURE);
   }
 
