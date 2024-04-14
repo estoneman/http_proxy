@@ -1,5 +1,6 @@
 #include "../include/async.h"
 
+#include "../include/http_proxy_util.h"
 #include "../include/socket_util.h"
 
 /* thread access management */
@@ -50,12 +51,13 @@ void *async_prefetch_response(void *arg) {
 
   char **urls, *request;
   size_t n_urls;
-  ssize_t skip, total_skip, nb_sent, len_request, len_response;
+  ssize_t skip, total_skip, len_request;
   int origin_sockfd;
 
   skip = total_skip = 0;
 
   pthread_rwlock_rdlock(&sb_rwlock);
+
   while ((skip = find_crlf(socket_buf->data + total_skip,
                            socket_buf->len_data - total_skip)) > 0) {
     total_skip += skip + 2;  // + 2 to move past CRLF
@@ -67,12 +69,22 @@ void *async_prefetch_response(void *arg) {
 
   total_skip += 2;  // move past final CRLF
 
-  urls = get_urls(socket_buf->data + total_skip,
-                  socket_buf->len_data - total_skip, &n_urls);
+  // no data, e.g., server replied with 301 Moved Permanently
+  if ((urls = get_urls(socket_buf->data + total_skip,
+                       socket_buf->len_data - total_skip, &n_urls)) == NULL) {
+    return NULL;
+  }
+
   pthread_rwlock_unlock(&sb_rwlock);
 
   pthread_t cache_threads[n_urls];
+  pthread_t send_threads[n_urls];
+  pthread_t recv_threads[n_urls];
+
+  SocketBuffer prefetch_sb_recv;
+  SocketBuffer prefetch_sb_send;
   ProxyCache pc_write[n_urls];
+
   HTTPUri uris[n_urls];
   unsigned long hash;
 
@@ -83,24 +95,30 @@ void *async_prefetch_response(void *arg) {
   }
 
   for (size_t i = 0; i < n_urls; ++i) {
-    cache_threads[i] = i;
-    parse_uri(urls[i], strlen(urls[i]), &uris[i]);
+    // offset thread ids
+    cache_threads[i] = i + n_urls;
+    send_threads[i] = i + (n_urls * 2);
+    recv_threads[i] = i + (n_urls * 3);
 
-#ifdef DEBUG
-    fprintf(stderr, "[%s] found url: %s\n", __func__, urls[i]);
-    fflush(stderr);
-#endif
+    parse_uri(urls[i], strlen(urls[i]), &uris[i]);
 
     if ((origin_sockfd = connection_sockfd(uris[i].host.hostname,
                                            uris[i].host.port)) == -1) {
       continue;
     }
 
-    len_request = snprintf(request, HTTP_MAXLINE_CMD, "GET %s HTTP/1.1\r\n\r\n",
-                           uris[i].host.remote_uri);
+    /*
+     * > GET /~rek/Grad_Nets/Spring2013/Program0_S13.pdf HTTP/1.1
+       > Host: web.cs.wpi.edu
+       > User-Agent: curl/7.81.0
+       > Accept: *\* -- yes, it should be a forward slash, but C comments..
+     */
+    len_request = snprintf(request, HTTP_MAXLINE_CMD, "GET %s HTTP/1.1\r\n"
+                                                      "Host: %s\r\n"
+                                                      "Accept: */*\r\n"
+                                                      "\r\n",
+                           uris[i].host.remote_uri, uris[i].host.hostname);
     hash = hash_djb2(urls[i]);
-
-    pthread_rwlock_wrlock(&pc_rwlock);
 
     snprintf(pc_write[i].fpath, HASH_LEN, "%0*lx", HASH_LEN - 1, hash);
     strnins(pc_write[i].fpath, CACHE_BASE, sizeof(CACHE_BASE));
@@ -111,21 +129,42 @@ void *async_prefetch_response(void *arg) {
     fflush(stderr);
 #endif
 
-    if ((nb_sent = proxy_send(origin_sockfd, request, len_request)) !=
-        len_request) {
-      fprintf(stderr, "[ERROR] incomplete send\n");
+    prefetch_sb_send.sockfd = origin_sockfd;
+    prefetch_sb_send.data = request;
+    prefetch_sb_send.len_data = len_request;
+
+    if (pthread_create(&send_threads[i], NULL, async_proxy_send,
+                       &prefetch_sb_send) < 0) {
+      fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+              __LINE__ - 1);
 
       continue;
     }
 
-    if ((pc_write[i].data = proxy_recv(origin_sockfd, &len_response)) == NULL) {
-      fprintf(stderr, "[ERROR] unable to receive any data during prefetch\n");
+    prefetch_sb_recv.sockfd = origin_sockfd;
+
+    if (pthread_create(&recv_threads[i], NULL, async_proxy_recv,
+                       &prefetch_sb_recv) < 0) {
+      fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+              __LINE__ - 1);
 
       continue;
     }
+    pthread_join(recv_threads[i], NULL);
+    close(prefetch_sb_recv.sockfd);
 
-    pc_write[i].len_data = len_response;
-    pthread_rwlock_unlock(&pc_rwlock);
+    // allocate space for cache buffer
+    if ((pc_write[i].data = alloc_buf(prefetch_sb_recv.len_data)) == NULL) {
+      fprintf(stderr, "[FATAL] out of memory\n");
+
+      exit(EXIT_FAILURE);
+    }
+
+    memcpy(pc_write[i].data, prefetch_sb_recv.data,
+           prefetch_sb_recv.len_data);
+    pc_write[i].len_data = prefetch_sb_recv.len_data;
+
+    free(prefetch_sb_recv.data);  // no longer in use
 
     if (pthread_create(&cache_threads[i], NULL, async_cache_response,
                        &pc_write[i]) < 0) {
@@ -135,8 +174,6 @@ void *async_prefetch_response(void *arg) {
 
       continue;
     }
-
-    close(origin_sockfd);
   }
 
   for (size_t i = 0; i < n_urls; ++i) {
@@ -145,6 +182,10 @@ void *async_prefetch_response(void *arg) {
     }
 
     free(pc_write[i].data);
+
+    if (pthread_kill(send_threads[i], 0) == 0) {
+      pthread_join(send_threads[i], NULL);
+    }
   }
 
   for (size_t i = 0; i < MAX_URLS; ++i) {
