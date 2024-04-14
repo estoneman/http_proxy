@@ -15,7 +15,12 @@ int connection_sockfd(const char *hostname, const char *port) {
       0) {
     fprintf(stderr, "[ERROR] getaddrinfo: %s\n", gai_strerror(addrinfo_status));
 
-    return -1;
+    return HTTP_NOT_FOUND_CODE;
+  }
+
+  // look up ip in blocklist
+  for (srv_entry = srv_entries; srv_entry != NULL;
+       srv_entry = srv_entry->ai_next) {
   }
 
   // loop through results of call to getaddrinfo
@@ -26,6 +31,10 @@ int connection_sockfd(const char *hostname, const char *port) {
                          srv_entry->ai_protocol)) < 0) {
       perror("socket");
       continue;
+    }
+
+    if (is_blocked(hostname, srv_entry) & 1) {
+      return HTTP_FORBIDDEN_CODE;
     }
 
     /*
@@ -49,7 +58,7 @@ int connection_sockfd(const char *hostname, const char *port) {
 
   if (srv_entry == NULL) {
     freeaddrinfo(srv_entries);
-    return -1;
+    return HTTP_NOT_FOUND_CODE;
   }
 
   freeaddrinfo(srv_entries);
@@ -122,6 +131,59 @@ void get_ipstr(char *ipstr, struct sockaddr *addr) {
   inet_ntop(addr->sa_family, get_inetaddr(addr), ipstr, INET6_ADDRSTRLEN);
 }
 
+int is_blocked(const char *hostname, struct addrinfo *srv_entry) {
+  void *addr;
+  char ipstr[INET6_ADDRSTRLEN];
+  char *blocklist;
+  size_t nb_read;
+  char *delim = "\n";
+  char *blocked_host;
+
+  if (srv_entry->ai_family == AF_INET) {
+    struct sockaddr_in *ipv4 = (struct sockaddr_in *)srv_entry->ai_addr;
+    addr = &(ipv4->sin_addr);
+  } else {
+    struct sockaddr_in6 *ipv4 = (struct sockaddr_in6 *)srv_entry->ai_addr;
+    addr = &(ipv4->sin6_addr);
+  }
+
+  inet_ntop(srv_entry->ai_family, addr, ipstr, sizeof(ipstr));
+  blocklist = read_file("./blocklist", &nb_read);
+  blocked_host = strtok(blocklist, delim);
+
+  unsigned long blocked_hash, ip_hash, hostname_hash;
+  while (blocked_host != NULL) {
+    blocked_hash = strtoul(blocked_host, NULL, 16);
+    ip_hash = hash_djb2(ipstr);
+    hostname_hash = hash_djb2(hostname);
+#ifdef DEBUG
+    fprintf(stderr, "[%s] comparing %lx and %s\n", __func__,
+            ip_hash, blocked_host);
+    fflush(stderr);
+#endif
+    if (blocked_hash == ip_hash) {
+      free(blocklist);
+
+      return 1;
+    }
+#ifdef DEBUG
+    fprintf(stderr, "[%s] comparing %lx and %s\n", __func__,
+            hostname_hash, blocked_host);
+    fflush(stderr);
+#endif
+    if (blocked_hash == hostname_hash) {
+      free(blocklist);
+
+      return 1;
+    }
+
+    blocked_host = strtok(NULL, delim);
+  }
+
+  free(blocklist);
+
+  return 0;
+}
 int is_valid_port(const char *arg) {
   int port = atoi(arg);
   return (port >= 1024 && port <= 65535);
@@ -136,6 +198,8 @@ char *proxy_recv(int sockfd, ssize_t *nb_recv) {
             __LINE__ - 1);
     return NULL;
   }
+
+  set_timeout(sockfd, RCVTIMEO_SEC, RCVTIMEO_USEC);
 
   bytes_alloced = RECV_CHUNK_SZ;
 
