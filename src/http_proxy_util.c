@@ -268,14 +268,6 @@ void handle_connection(int client_sockfd, int cache_timeout) {
     // don't need anymore
     close(origin_sockfd);
 
-    // prefetch response
-    if (pthread_create(&tid_prefetch_response, NULL, async_prefetch_response,
-                       &sb_recv) < 0) {
-      fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
-              __LINE__ - 1);
-      exit(EXIT_FAILURE);
-    }
-
     // allocate space for socket send buffer
     if ((sb_send.data = alloc_buf(sb_recv.len_data)) == NULL) {
       fprintf(stderr, "[FATAL] out of memory\n");
@@ -343,6 +335,14 @@ void handle_connection(int client_sockfd, int cache_timeout) {
     exit(EXIT_FAILURE);
   }
 
+  // prefetch response
+  if (pthread_create(&tid_prefetch_response, NULL, async_prefetch_response,
+                     &sb_send) < 0) {
+    fprintf(stderr, "[ERROR] could not create thread: %s:%d\n", __func__,
+            __LINE__ - 1);
+    exit(EXIT_FAILURE);
+  }
+
   // cache response
   if (!*(http_cmd.uri.query[0].key)) {  // static content, cache it
     strncpy(pc_write.fpath, pc_read.fpath, HTTP_FNAME_MAX);
@@ -357,6 +357,9 @@ void handle_connection(int client_sockfd, int cache_timeout) {
 
   pthread_join(tid_forward_request, NULL);
   pthread_join(tid_forward_response, NULL);
+
+  close(client_sockfd);
+
   pthread_join(tid_cache_response, NULL);
   pthread_join(tid_prefetch_response, NULL);
 
