@@ -12,6 +12,7 @@
 #define CRLF "\r\n"
 #define HASH_LEN 16
 #define HTML_400 "./err/400.html"
+#define HTML_403 "./err/403.html"
 #define HTML_404 "./err/404.html"
 
 #define HTTP_FNAME_MAX sizeof(CACHE_BASE) + HASH_LEN + 1
@@ -35,6 +36,7 @@
 #define HTTP_VERSION_MAX 16
 
 #define HTTP_BAD_REQUEST_CODE 400
+#define HTTP_FORBIDDEN_CODE 403
 #define HTTP_NOT_FOUND_CODE 404
 #define HTTP_METHOD_NOT_ALLOWED_CODE 405
 #define HTTP_VERSION_NOT_SUPPORTED_CODE 505
@@ -76,7 +78,7 @@ int chk_alloc_err(void *, const char *, const char *, int);
 ssize_t find_crlf(char *, size_t);
 char **get_urls(char *, size_t, size_t *);
 void handle_connection(int, int);
-unsigned long hash_djb2(char *);
+unsigned long hash_djb2(const char *);
 ssize_t http_readline(char *, size_t, char *);
 const char *http_status_msg(int);
 ssize_t parse_command(char *, size_t, HTTPCommand *);
