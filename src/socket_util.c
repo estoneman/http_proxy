@@ -157,8 +157,8 @@ int is_blocked(const char *hostname, struct addrinfo *srv_entry) {
     ip_hash = hash_djb2(ipstr);
     hostname_hash = hash_djb2(hostname);
 #ifdef DEBUG
-    fprintf(stderr, "[%s] comparing %lx and %s\n", __func__,
-            ip_hash, blocked_host);
+    fprintf(stderr, "[%s] comparing %lx and %s\n", __func__, ip_hash,
+            blocked_host);
     fflush(stderr);
 #endif
     if (blocked_hash == ip_hash) {
@@ -167,8 +167,8 @@ int is_blocked(const char *hostname, struct addrinfo *srv_entry) {
       return 1;
     }
 #ifdef DEBUG
-    fprintf(stderr, "[%s] comparing %lx and %s\n", __func__,
-            hostname_hash, blocked_host);
+    fprintf(stderr, "[%s] comparing %lx and %s\n", __func__, hostname_hash,
+            blocked_host);
     fflush(stderr);
 #endif
     if (blocked_hash == hostname_hash) {

@@ -113,10 +113,11 @@ void *async_prefetch_response(void *arg) {
        > User-Agent: curl/7.81.0
        > Accept: *\* -- yes, it should be a forward slash, but C comments..
      */
-    len_request = snprintf(request, HTTP_MAXLINE_CMD, "GET %s HTTP/1.1\r\n"
-                                                      "Host: %s\r\n"
-                                                      "Accept: */*\r\n"
-                                                      "\r\n",
+    len_request = snprintf(request, HTTP_MAXLINE_CMD,
+                           "GET %s HTTP/1.1\r\n"
+                           "Host: %s\r\n"
+                           "Accept: */*\r\n"
+                           "\r\n",
                            uris[i].host.remote_uri, uris[i].host.hostname);
     hash = hash_djb2(urls[i]);
 
@@ -160,8 +161,7 @@ void *async_prefetch_response(void *arg) {
       exit(EXIT_FAILURE);
     }
 
-    memcpy(pc_write[i].data, prefetch_sb_recv.data,
-           prefetch_sb_recv.len_data);
+    memcpy(pc_write[i].data, prefetch_sb_recv.data, prefetch_sb_recv.len_data);
     pc_write[i].len_data = prefetch_sb_recv.len_data;
 
     free(prefetch_sb_recv.data);  // no longer in use

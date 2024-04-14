@@ -207,7 +207,7 @@ void handle_connection(int client_sockfd, int cache_timeout) {
   rebuild_uri(uri, &http_cmd, 1);
   hash = hash_djb2(uri);
 
-  snprintf(pc_read.fpath, HASH_LEN, "%lx",  hash);
+  snprintf(pc_read.fpath, HASH_LEN, "%lx", hash);
   strnins(pc_read.fpath, CACHE_BASE, sizeof(CACHE_BASE));
 
 #ifdef DEBUG
@@ -235,15 +235,16 @@ void handle_connection(int client_sockfd, int cache_timeout) {
     // delete stale entry
     if (access == 0) {
 #ifdef DEBUG
-    fprintf(stderr, "[%s] removing stale cache entry %s\n", __func__, uri);
-    fflush(stderr);
+      fprintf(stderr, "[%s] removing stale cache entry %s\n", __func__, uri);
+      fflush(stderr);
 #endif
       unlink(pc_read.fpath);
     }
 
     // connect to origin server
     if ((http_status = connection_sockfd(http_cmd.uri.host.hostname,
-                                           http_cmd.uri.host.port)) > HTTP_BAD_REQUEST_CODE) {
+                                         http_cmd.uri.host.port)) >
+        HTTP_BAD_REQUEST_CODE) {
       // could not create socket to connect to origin server
       if (send_err(client_sockfd, http_status) < 0) {
         free(http_hdrs);
@@ -766,7 +767,8 @@ int send_err(int sockfd, size_t http_status_code) {
       err_file = HTML_404;
       break;
     default:
-      fprintf(stderr, "[FATAL] (%s:%d) this code should be unreachable\n", __func__, __LINE__);
+      fprintf(stderr, "[FATAL] (%s:%d) this code should be unreachable\n",
+              __func__, __LINE__);
       exit(EXIT_FAILURE);
   }
 
