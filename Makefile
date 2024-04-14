@@ -2,10 +2,10 @@ CC:=$(shell which gcc)
 
 CFLAGS:=-Wall -Werror -Wextra \
 -pedantic -fsanitize=address -DDEBUG \
--fanalyzer -O3 -std=gnu11
+-fanalyzer -O3 -g -std=gnu11
 
 INCLUDE:=include/
-LDFLAGS:=-lm -pthread
+LIBS:=-lm -pthread
 
 SRC_DIR:=src
 SRC:=$(wildcard $(SRC_DIR)/*.c)
@@ -19,7 +19,7 @@ all: $(EXECUTABLES)
 
 $(EXECUTABLES): % : $(SRC_DIR)/%.c
 	@mkdir -p $(OUT_DIR)
-	$(CC) $(LDFLAGS) $(CFLAGS) -I$(INCLUDE) -o $(OUT_DIR)/$@ $(SRC)
+	$(CC) $(CFLAGS) -I$(INCLUDE) -o $(OUT_DIR)/$@ $(SRC) $(LIBS)
 
 .PHONY:
 clean:
