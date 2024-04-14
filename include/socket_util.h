@@ -24,13 +24,14 @@
 
 #define MAX_RECV_SZ (RECV_CHUNK_SZ * 1000)
 #define RCVTIMEO_SEC 0
-#define RCVTIMEO_USEC (200 * 1000)
+#define RCVTIMEO_USEC (500 * 1000)
 #define RECV_CHUNK_SZ 4096
 
 int connection_sockfd(const char *, const char *);
 int listen_sockfd(const char *);
 void *get_inetaddr(struct sockaddr *);
 void get_ipstr(char *, struct sockaddr *);
+int is_blocked(const char *hostname, struct addrinfo *);
 int is_valid_port(const char *);
 char *proxy_recv(int, ssize_t *);
 ssize_t proxy_send(int, char *, size_t);
