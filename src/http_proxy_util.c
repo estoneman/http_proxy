@@ -666,6 +666,7 @@ char *read_file(const char *fpath, size_t *nb_read) {
 
   if ((*nb_read = fread(out_buf, 1, st.st_size, fp)) < (size_t)st.st_size) {
     fclose(fp);
+    free(out_buf);
 
     return NULL;
   }
