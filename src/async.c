@@ -96,9 +96,9 @@ void *async_prefetch_response(void *arg) {
 
   for (size_t i = 0; i < n_urls; ++i) {
     // offset thread ids
-    cache_threads[i] = i + n_urls;
-    send_threads[i] = i + (n_urls * 2);
-    recv_threads[i] = i + (n_urls * 3);
+    // cache_threads[i] = i + n_urls;
+    // send_threads[i] = i + (n_urls * 2);
+    // recv_threads[i] = i + (n_urls * 3);
 
     parse_uri(urls[i], strlen(urls[i]), &uris[i]);
 
